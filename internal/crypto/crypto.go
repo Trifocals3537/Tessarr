@@ -9,6 +9,7 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"errors"
+	"fmt"
 	"io"
 )
 
@@ -26,10 +27,12 @@ const (
 )
 
 var (
-	ErrBadPassword    = errors.New("rar: incorrect password")
-	ErrInvalidKeySize = errors.New("rar: invalid key size")
-	ErrInvalidIVSize  = errors.New("rar: invalid IV size")
-	ErrInvalidData    = errors.New("rar: invalid encrypted data")
+	ErrBadPassword                  = errors.New("rar: incorrect password")
+	ErrInvalidKeySize               = errors.New("rar: invalid key size")
+	ErrInvalidIVSize                = errors.New("rar: invalid IV size")
+	ErrInvalidData                  = errors.New("rar: invalid encrypted data")
+	ErrInvalidKDFCount              = errors.New("rar: invalid KDF count")
+	ErrUnsupportedEncryptionVersion = errors.New("rar: unsupported encryption version")
 )
 
 // DerivedKeys contains the keys derived from a password using RAR5's PBKDF2.
@@ -42,13 +45,15 @@ type DerivedKeys struct {
 // DeriveKeys derives encryption keys from password using RAR5's PBKDF2-HMAC-SHA256.
 // kdfCount is the log2 of iterations (actual iterations = 2^kdfCount).
 // This implementation matches RAR5's calcKeys50 algorithm.
-func DeriveKeys(password, salt []byte, kdfCount int) *DerivedKeys {
+// Counts outside 0..MaxKdfCount return an error before any derivation work.
+func DeriveKeys(password, salt []byte, kdfCount int) (*DerivedKeys, error) {
+	iterations, err := kdfIterations(kdfCount)
+	if err != nil {
+		return nil, err
+	}
 	if len(salt) > MaxPbkdf2Salt {
 		salt = salt[:MaxPbkdf2Salt]
 	}
-
-	// Calculate actual iteration count
-	iterations := 1 << uint(kdfCount)
 
 	// Initialize HMAC with password
 	prf := hmac.New(sha256.New, password)
@@ -64,7 +69,7 @@ func DeriveKeys(password, salt []byte, kdfCount int) *DerivedKeys {
 
 	// Derive 3 keys with different iteration counts
 	keys := make([][]byte, 3)
-	iterCounts := []int{iterations, 16, 16}
+	iterCounts := []uint32{iterations, 16, 16}
 
 	for i, iter := range iterCounts {
 		for iter > 0 {
@@ -98,7 +103,26 @@ func DeriveKeys(password, salt []byte, kdfCount int) *DerivedKeys {
 		Key:      keys[0],
 		CheckKey: keys[1],
 		PwCheck:  pwcheck,
+	}, nil
+}
+
+// kdfIterations validates the work factor before any shift, decrement, or HMAC
+// operation. The bounded uint32 count has the same meaning on 32/64-bit builds.
+func kdfIterations(kdfCount int) (uint32, error) {
+	if kdfCount < 0 || kdfCount > MaxKdfCount {
+		return 0, fmt.Errorf("%w: %d (maximum %d)", ErrInvalidKDFCount, kdfCount, MaxKdfCount)
 	}
+	return uint32(1) << uint(kdfCount), nil
+}
+
+// ValidateEncryptionParameters is shared by archive and file header readers.
+// Unsupported algorithms and work factors must be rejected even without a password.
+func ValidateEncryptionParameters(version uint64, kdfCount int) error {
+	if version != 0 {
+		return fmt.Errorf("%w: %d", ErrUnsupportedEncryptionVersion, version)
+	}
+	_, err := kdfIterations(kdfCount)
+	return err
 }
 
 // VerifyPassword checks if the password is correct by comparing password check values.
@@ -245,7 +269,7 @@ type EncryptionHeader struct {
 // ParseEncryptionHeader parses a RAR5 encryption header.
 // Format: version (vint) + flags (vint) + kdfCount (1 byte) + salt (16 bytes) + [pwCheck (12 bytes)]
 func ParseEncryptionHeader(data []byte) (*EncryptionHeader, error) {
-	if len(data) < 18 { // Minimum: version + flags + kdfCount + salt
+	if len(data) < 19 { // Minimum: version + flags + kdfCount + salt
 		return nil, ErrInvalidData
 	}
 
@@ -270,6 +294,9 @@ func ParseEncryptionHeader(data []byte) (*EncryptionHeader, error) {
 	}
 	kdfCount := int(data[pos])
 	pos++
+	if err := ValidateEncryptionParameters(uint64(version), kdfCount); err != nil {
+		return nil, err
+	}
 
 	// Read salt (16 bytes)
 	if pos+16 > len(data) {

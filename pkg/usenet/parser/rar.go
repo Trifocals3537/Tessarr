@@ -694,89 +694,69 @@ func (p *RARParser) parseRAR5FileHeader(data []byte, volumeIndex int, volumeName
 	var encryptionIV []byte
 	var encryptionKey []byte
 
-	if r.Len() > 0 {
-		// Parse extra area records
-		for r.Len() > 2 {
-			// Read record size (vint)
-			recordSize, err := readVInt(r)
-			if err != nil || recordSize == 0 || recordSize > 65536 {
-				break
-			}
-
-			// Read record type (vint)
-			recordType, err := readVInt(r)
-			if err != nil {
-				break
-			}
-
-			// Calculate remaining data in this record
-			recordDataSize := int(recordSize) - 1 // Minus the type byte (approximate)
-			if recordDataSize <= 0 || recordDataSize > 65536 || recordDataSize > r.Len() {
-				// Invalid or too large record - stop parsing extra area
-				break
-			}
-
-			if recordType == RAR5ExtraTypeEncryption {
-				// Encryption record format:
-				// - Version (vint)
-				// - Flags (vint)
-				// - KDF count (1 byte)
-				// - Salt (16 bytes, if UseAES256 flag set)
-				// - IV (16 bytes)
-				// - Check value (12 bytes, optional if flags & 0x01)
-				isEncrypted = true
-
-				// Read encryption version
-				_, err := readVInt(r)
-				if err != nil {
-					break
-				}
-
-				// Read flags
-				encFlags, err := readVInt(r)
-				if err != nil {
-					break
-				}
-
-				// Read KDF count (1 byte)
-				kdfByte, err := r.ReadByte()
-				if err != nil {
-					break
-				}
-				kdfCount := int(kdfByte)
-
-				// Read salt (16 bytes)
-				salt := make([]byte, 16)
-				if _, err := io.ReadFull(r, salt); err != nil {
-					break
-				}
-
-				// If we have a password, derive the file-specific key using this salt
-				if password != "" {
-					derivedKeys := crypto.DeriveKeys([]byte(password), salt, kdfCount)
-					encryptionKey = derivedKeys.Key
-				}
-
-				// Read IV (16 bytes) - THIS IS WHAT WE NEED
-				iv := make([]byte, 16)
-				if _, err := io.ReadFull(r, iv); err != nil {
-					break
-				}
-				encryptionIV = iv
-
-				// Skip check value if present (flags & 0x01 = has check)
-				if encFlags&0x01 != 0 {
-					checkValue := make([]byte, 12)
-					_, _ = io.ReadFull(r, checkValue)
-				}
-			} else {
-				// Skip other record types
-				skipData := make([]byte, recordDataSize)
-				if _, err := io.ReadFull(r, skipData); err != nil {
-					break
-				}
+	for r.Len() > 0 {
+		recordSize, err := readVInt(r)
+		if err != nil || recordSize == 0 || recordSize > 65536 || recordSize > uint64(r.Len()) {
+			return nil
+		}
+		// Bound every record before reading its fields. A truncated encryption
+		// record must not borrow its salt, IV, or check from the next record.
+		recordData := make([]byte, int(recordSize))
+		if _, err := io.ReadFull(r, recordData); err != nil {
+			return nil
+		}
+		record := bytes.NewReader(recordData)
+		recordType, err := readVInt(record)
+		if err != nil {
+			return nil
+		}
+		if recordType != RAR5ExtraTypeEncryption {
+			continue
+		}
+		if isEncrypted {
+			return nil // Conflicting encryption records are ambiguous.
+		}
+		version, err := readVInt(record)
+		if err != nil {
+			return nil
+		}
+		encFlags, err := readVInt(record)
+		if err != nil {
+			return nil
+		}
+		kdfByte, err := record.ReadByte()
+		if err != nil {
+			return nil
+		}
+		kdfCount := int(kdfByte)
+		if err := crypto.ValidateEncryptionParameters(version, kdfCount); err != nil {
+			return nil
+		}
+		salt := make([]byte, 16)
+		if _, err := io.ReadFull(record, salt); err != nil {
+			return nil
+		}
+		iv := make([]byte, 16)
+		if _, err := io.ReadFull(record, iv); err != nil {
+			return nil
+		}
+		var checkValue []byte
+		if encFlags&0x01 != 0 {
+			checkValue = make([]byte, 12)
+			if _, err := io.ReadFull(record, checkValue); err != nil {
+				return nil
 			}
 		}
+		// Validate the entire record before entering the derivation loop.
+		if password != "" {
+			derivedKeys, err := crypto.DeriveKeys([]byte(password), salt, kdfCount)
+			if err != nil || (checkValue != nil && !crypto.VerifyPassword(derivedKeys, checkValue)) {
+				return nil
+			}
+			encryptionKey = derivedKeys.Key
+		}
+		isEncrypted = true
+		encryptionIV = iv
 	}
 
 	return &RARFileEntry{

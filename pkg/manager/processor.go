@@ -293,53 +293,27 @@ func (m *Manager) processQueuedEntries(ctx context.Context) {
 
 func (m *Manager) processQueuedNZB(ctx context.Context, entry *storage.Entry) error {
 	defer m.processingEntries.Delete(entry.InfoHash)
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	// Check if the nzb is already processed. Only header fields (status, file
-	// list) are needed here; processNZB does not touch the segment map.
-	metadata, err := m.usenet.GetNZBHeader(entry.InfoHash)
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	if err != nil {
-		m.logger.Error().Err(err).Str("name", entry.Name).Msg("Error getting NZB metadata")
-		entry.MarkAsError(err)
-		_ = m.queue.Update(entry)
-		return nil
-	}
-	if metadata == nil {
-		m.logger.Error().Str("name", entry.Name).Msg("NZB metadata not found")
-		entry.MarkAsError(fmt.Errorf("nzb metadata not found"))
-		_ = m.queue.Update(entry)
-		return nil
-	}
-	switch metadata.Status {
-	case usenet.NZBStatusFailed:
-		m.logger.Error().Str("name", entry.Name).Msg("NZB processing failed")
-		entry.MarkAsError(fmt.Errorf("nzb processing failed"))
-		_ = m.queue.Update(entry)
-		return nil
-	case usenet.NZBStatusParsing, usenet.NZBStatusDownloading:
-		// Still processing, skip for now
-		return nil
-	case usenet.NZBStatusCompleted:
-		if err := m.processNZB(ctx, entry, metadata); err != nil {
-			if errors.Is(err, errDeleteQueueEntryOnJobFinish) || errors.Is(err, context.Canceled) {
-				return err
-			}
-			m.logger.Error().Err(err).Str("name", entry.Name).Msg("Error processing queued NZB")
-			entry.MarkAsError(err)
-			_ = m.queue.Update(entry)
-			return nil
+	return m.runNZBFinalization(ctx, entry, func(workCtx context.Context, current *storage.Entry) error {
+		// Inspect metadata under the same ownership as active completion. A stale
+		// metadata error must not overwrite a completed outcome from that worker.
+		metadata, err := m.usenet.GetNZBHeader(current.InfoHash)
+		if err != nil {
+			return fmt.Errorf("get NZB metadata: %w", err)
 		}
-	default:
-		m.logger.Error().Str("name", entry.Name).Msgf("Unknown NZB status: %s", metadata.Status)
-		entry.MarkAsError(fmt.Errorf("unknown nzb status: %s", metadata.Status))
-		_ = m.queue.Update(entry)
-		return nil
-	}
-	return nil
+		if metadata == nil {
+			return fmt.Errorf("nzb metadata not found")
+		}
+		switch metadata.Status {
+		case usenet.NZBStatusFailed:
+			return fmt.Errorf("nzb processing failed")
+		case usenet.NZBStatusParsing, usenet.NZBStatusDownloading:
+			return nil
+		case usenet.NZBStatusCompleted:
+			return m.processNZBCompletion(workCtx, current, metadata)
+		default:
+			return fmt.Errorf("unknown nzb status: %s", metadata.Status)
+		}
+	})
 }
 
 func providerReportedTransferError(torrent *debridTypes.Torrent) bool {
@@ -646,6 +620,9 @@ func (m *Manager) processAction(ctx context.Context, entry *storage.Entry) error
 	// queue incarnation created after the prior main entry was retired. This
 	// transient bind cannot be minted by provider refresh or an old worker.
 	if err := m.storage.PrepareQueuedReplacement(entry); err != nil {
+		if entry.IsNZB() {
+			return err // The exclusive finalizer owns the failure transition.
+		}
 		m.logger.Error().Err(err).Str("name", entry.Name).Msg("Failed to authorize completed download")
 		entry.MarkAsError(err)
 		_ = m.queue.Update(entry)
@@ -656,6 +633,9 @@ func (m *Manager) processAction(ctx context.Context, entry *storage.Entry) error
 	if err := m.AddOrUpdate(entry, func(t *storage.Entry) {
 		m.RefreshEntries(true)
 	}); err != nil {
+		if entry.IsNZB() {
+			return err
+		}
 		m.logger.Error().Err(err).Str("name", entry.Name).Msg("Failed to persist completed download")
 		entry.MarkAsError(err)
 		_ = m.queue.Update(entry)

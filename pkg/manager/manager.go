@@ -326,7 +326,7 @@ func (m *Manager) startEntryBackground(parent context.Context, name string, entr
 			if outcome.Kind == workflow.Panicked {
 				m.logger.Error().Str("task", name).Bytes("stack", outcome.Stack).Msg("Scheduled workflow panicked")
 			}
-			if workErr != nil && lease.Context().Err() == nil && outcome.Kind != workflow.Canceled && !errors.Is(workErr, errDeleteQueueEntryOnJobFinish) {
+			if workErr != nil && lease.Context().Err() == nil && outcome.Kind != workflow.Canceled && !errors.Is(workErr, errDeleteQueueEntryOnJobFinish) && !isNZBFinalizationError(workErr) {
 				_ = m.commitJobOutcome(&Job{Entry: entry}, storage.QueueOutcome{Kind: storage.QueueOutcomeFailed, Err: workErr})
 			}
 		}()
@@ -340,7 +340,7 @@ func (m *Manager) startEntryBackground(parent context.Context, name string, entr
 			}
 			return
 		}
-		if workErr != nil && !errors.Is(workErr, context.Canceled) {
+		if workErr != nil && !errors.Is(workErr, context.Canceled) && !isNZBFinalizationError(workErr) {
 			m.logger.Error().
 				Err(workErr).
 				Str("task", name).
@@ -619,6 +619,9 @@ func (m *Manager) processJob(ctx context.Context, job *Job) {
 		return
 	}
 	if err := outcome.Err; err != nil {
+		if isNZBFinalizationError(err) {
+			return // The finalizer already published or deliberately preserved its outcome.
+		}
 		if errors.Is(err, errDeleteQueueEntryOnJobFinish) {
 			job.DeleteOnFinish = true
 			return

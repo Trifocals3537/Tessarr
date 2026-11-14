@@ -6,6 +6,7 @@ import (
 	"encoding/base32"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -118,6 +119,40 @@ func TestGetMagnetFromBytesStripsTrackersFromUploadedFileWithoutChangingHash(t *
 	}
 	if got := metadata.HashInfoBytes().HexString(); got != original.InfoHash {
 		t.Fatalf("sanitized file infohash = %q, want %q", got, original.InfoHash)
+	}
+}
+
+func TestGetMagnetFromBytesRejectsExcessiveNesting(t *testing.T) {
+	// Valid torrent metadata with an unknown extension field. Unknown fields
+	// are accepted at ordinary depths, but must not permit unbounded recursion
+	// either in the outer document or inside the raw info dictionary.
+	const info = "d6:lengthi1e4:name1:x12:piece lengthi16384e6:pieces20:abcdefghijklmnopqrste"
+	for _, location := range []string{"document", "info"} {
+		for _, kind := range []string{"list", "dictionary"} {
+			t.Run(location+"/"+kind, func(t *testing.T) {
+				for _, depth := range []int{4, 1024} {
+					t.Run(fmt.Sprint(depth), func(t *testing.T) {
+						prefix := "l"
+						if kind == "dictionary" {
+							prefix = "d1:a"
+						}
+						value := strings.Repeat(prefix, depth) + "i0e" + strings.Repeat("e", depth)
+						document := "d4:info" + info + "2:zz" + value + "e"
+						if location == "info" {
+							document = "d4:info" + info[:len(info)-1] + "2:zz" + value + "ee"
+						}
+						got, err := GetMagnetFromBytes([]byte(document), true)
+						if depth == 4 {
+							if err != nil || got == nil || got.Name != "x" || got.Size != 1 {
+								t.Fatalf("ordinary extension metadata rejected: %+v %v", got, err)
+							}
+						} else if err == nil || got != nil {
+							t.Fatal("excessively nested torrent metadata was admitted")
+						}
+					})
+				}
+			})
+		}
 	}
 }
 

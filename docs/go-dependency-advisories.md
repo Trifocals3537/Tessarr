@@ -40,7 +40,9 @@ outer document and raw info dictionary, while accepting ordinary extensions.
 All four excessive-nesting cases reproduced on the previous dependency.
 Frozen NZB frames produced with `compress v1.18.7` verify full metadata,
 header-only, and sampled message-ID reads after the upgrade, with and without
-article geometry. Existing torrent tests verify infohash and tracker behavior.
+article geometry. The deprecated torrent magnet constructor is replaced with
+the equivalent v1 magnet fields from already validated metadata. Regression
+tests retain the infohash, UTF-8 display name, tracker policy, and web seeds.
 
 Reproduce the current checks from the repository root:
 

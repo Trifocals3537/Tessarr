@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -16,6 +17,7 @@ import (
 	"time"
 
 	"github.com/Trifocals3537/tessarr/internal/testutil"
+	"github.com/anacrolix/torrent/bencode"
 	"github.com/anacrolix/torrent/metainfo"
 )
 
@@ -153,6 +155,58 @@ func TestGetMagnetFromBytesRejectsExcessiveNesting(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+func TestGetMagnetFromBytesPreservesV1MagnetParameters(t *testing.T) {
+	source, err := os.ReadFile(testutil.GetTestTorrentPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	metadata, err := metainfo.Load(bytes.NewReader(source))
+	if err != nil {
+		t.Fatal(err)
+	}
+	info, err := metadata.UnmarshalInfo()
+	if err != nil {
+		t.Fatal(err)
+	}
+	info.NameUtf8 = "friendly title"
+	metadata.InfoBytes, err = bencode.Marshal(info)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const webSeed = "https://seed.invalid/file?a=1&b=2"
+	metadata.UrlList = []string{webSeed}
+	var encoded bytes.Buffer
+	if err := metadata.Write(&encoded); err != nil {
+		t.Fatal(err)
+	}
+	wantHash := metadata.HashInfoBytes().HexString()
+	for _, strip := range []bool{false, true} {
+		t.Run(fmt.Sprint(strip), func(t *testing.T) {
+			got, err := GetMagnetFromBytes(encoded.Bytes(), strip)
+			if err != nil {
+				t.Fatal(err)
+			}
+			link, err := url.Parse(got.Link)
+			if err != nil {
+				t.Fatal(err)
+			}
+			query := link.Query()
+			if got.InfoHash != wantHash || got.Name != info.Name || query.Get("dn") != info.NameUtf8 ||
+				len(query["xt"]) != 1 || query.Get("xt") != "urn:btih:"+wantHash ||
+				len(query["ws"]) != 1 || query.Get("ws") != webSeed {
+				t.Fatalf("legacy magnet parameters changed: %+v", got)
+			}
+			wantTrackers := len(metadata.UpvertedAnnounceList().DistinctValues())
+			if strip {
+				wantTrackers = 0
+			}
+			if len(query["tr"]) != wantTrackers {
+				t.Fatalf("trackers=%v, want %d", query["tr"], wantTrackers)
+			}
+		})
 	}
 }
 

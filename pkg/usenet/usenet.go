@@ -507,6 +507,26 @@ func (u *Usenet) Parse(ctx context.Context, name string, content []byte, categor
 // ParseWithID parses an NZB using a caller-provided ID. Supplying the ID lets
 // the manager expose a queued entry before the active-download worker starts.
 func (u *Usenet) ParseWithID(ctx context.Context, id, name string, content []byte, category string) (*storage.NZB, map[string]*parser.FileGroup, error) {
+	return u.parseWithID(ctx, id, name, content, category, false)
+}
+
+// ReparseWithID rebuilds an existing entry's metadata using its saved canonical
+// name. It must not reinterpret that name as a newly submitted filename, even
+// when the canonical name itself ends in .nzb. Validate it before any I/O.
+func (u *Usenet) ReparseWithID(ctx context.Context, id, name string, content []byte, category string) (*storage.NZB, map[string]*parser.FileGroup, error) {
+	if id == "" {
+		return nil, nil, fmt.Errorf("queued NZB ID is required")
+	}
+	if err := safepath.ValidateIdentifier(name); err != nil {
+		return nil, nil, fmt.Errorf("unsafe queued NZB name: %w", err)
+	}
+	return u.parseWithID(ctx, id, name, content, category, true)
+}
+
+func (u *Usenet) parseWithID(ctx context.Context, id, name string, content []byte, category string, preserveName bool) (*storage.NZB, map[string]*parser.FileGroup, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, nil, err
+	}
 	if len(content) == 0 {
 		return nil, nil, fmt.Errorf("NZB content is empty")
 	}
@@ -531,6 +551,9 @@ func (u *Usenet) ParseWithID(ctx context.Context, id, name string, content []byt
 	nzb, groups, err := prs.Parse(ctx, name, content)
 	if err != nil {
 		return nil, nil, err
+	}
+	if preserveName {
+		nzb.Name = name
 	}
 	if err := safepath.ValidateIdentifier(nzb.Name); err != nil {
 		return nil, nil, fmt.Errorf("unsafe NZB name: %w", err)

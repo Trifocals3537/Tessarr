@@ -296,10 +296,26 @@ func (m *Manager) processNewNzb(parentCtx context.Context, entry *storage.Entry,
 
 	updatedNZB, err := m.usenet.Process(ctx, metadata, groups)
 	if err != nil {
+		processingErr := fmt.Errorf("failed to process nzb: %w", err)
 		if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
-			return fmt.Errorf("usenet processing timed out after %s: %w", m.usenetTimeout, err)
+			processingErr = fmt.Errorf("usenet processing timed out after %s: %w", m.usenetTimeout, err)
 		}
-		return fmt.Errorf("failed to process nzb: %w", err)
+		// Process may have persisted completion before a source-cleanup error.
+		// Reconcile under the same lease as the scheduler, so this error cannot
+		// escape to processJob and overwrite another owner's completed output.
+		return m.runNZBFinalization(ctx, entry, func(workCtx context.Context, current *storage.Entry) error {
+			durable, loadErr := m.usenet.GetNZBHeader(current.InfoHash)
+			if loadErr != nil || durable == nil {
+				loadErr = errors.Join(loadErr, fmt.Errorf("cannot reconcile NZB processing metadata"))
+				m.recordWorkflowFault(loadErr)
+				return errors.Join(processingErr, loadErr)
+			}
+			if durable.Status == usenet.NZBStatusCompleted {
+				m.logger.Warn().Err(processingErr).Str("entry", current.InfoHash).Msg("Reconciling completed NZB after processing error")
+				return m.processNZBCompletion(workCtx, current, durable)
+			}
+			return processingErr
+		})
 	}
 
 	metadata = updatedNZB

@@ -435,10 +435,18 @@ jobs:
       - docker
     permissions:
       contents: write
+      actions: read
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Node for beta/RC publication approval
+        if: needs.prepare.outputs.channel != 'stable'
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: "22"
 
       - name: Download all artifacts
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
@@ -451,7 +459,19 @@ jobs:
         working-directory: dist
         run: sha256sum ./* > SHA256SUMS
 
+      - name: Revalidate beta/RC before release creation
+        id: release_gate
+        if: needs.prepare.outputs.channel != 'stable'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          BETA_MODE: publish
+          BETA_EXPECTED_SHA: ${{ inputs.expected_sha }}
+          BETA_CI_RUN_ID: ${{ inputs.ci_run_id }}
+        run: node scripts/beta-publish-gate.mjs
+
       - name: Create release
+        # A partial rerun must repeat approval even if image publishing passed.
+        if: needs.prepare.outputs.channel == 'stable' || steps.release_gate.outcome == 'success'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ needs.prepare.outputs.tag }}

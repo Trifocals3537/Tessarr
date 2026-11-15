@@ -164,6 +164,10 @@ func TestSeasonChildRecoveryPollsOnlyItsPersistedFileScope(t *testing.T) {
 	if err := applyDebridTorrentToEntry(parent, remote); err != nil {
 		t.Fatal(err)
 	}
+	// Production persists the authoritative parent before season fan-out.
+	if err := m.storage.AddOrUpdate(parent); err != nil {
+		t.Fatal(err)
+	}
 	downloader := &Downloader{logger: zerolog.Nop()}
 	multi, seasons := downloader.detectMultiSeason(parent)
 	if !multi || len(seasons) != 2 {

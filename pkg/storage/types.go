@@ -105,6 +105,10 @@ type Entry struct {
 	// FileScopeRestricted pins a synthetic season child to its canonical files.
 	// A provider refresh must never expand it back into the parent transfer.
 	FileScopeRestricted bool `msgpack:"file_scope_restricted,omitempty" json:"-"`
+	// SeasonSource identifies the authoritative main entry for a queue-only
+	// season child. Persist it so restart recovery never treats the synthetic
+	// child hash as an independent provider torrent or mounted source.
+	SeasonSource *SeasonSource `msgpack:"season_source,omitempty" json:"-"`
 
 	State TorrentState `msgpack:"state" json:"state"` // This is for QBitTorrent compatibility
 	// Provider State (from active providerEntry)
@@ -151,6 +155,11 @@ type Entry struct {
 	LastError     string     `msgpack:"last_error,omitempty" json:"last_error,omitempty"`           // Last error message
 	ErrorCount    int        `msgpack:"error_count,omitempty" json:"error_count,omitempty"`         // Number of errors
 	LastErrorTime *time.Time `msgpack:"last_error_time,omitempty" json:"last_error_time,omitempty"` // Last error time
+}
+
+type SeasonSource struct {
+	InfoHash string `msgpack:"info_hash"`
+	Season   int    `msgpack:"season"`
 }
 
 func (e *Entry) IsTorrent() bool {

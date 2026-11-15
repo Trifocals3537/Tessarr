@@ -167,6 +167,10 @@ func EntryToProto(e *Entry) *EntryProto {
 		TerminalChecks:          int32(e.TerminalChecks),
 		HandoffReason:           e.HandoffReason,
 	}
+	if e.SeasonSource != nil {
+		pb.SeasonSourceInfoHash = e.SeasonSource.InfoHash
+		pb.SeasonSourceNumber = int32(e.SeasonSource.Season)
+	}
 
 	// Timestamps
 	if !e.AddedOn.IsZero() {
@@ -249,6 +253,9 @@ func ProtoToEntry(pb *EntryProto) *Entry {
 		ClientEndpoint:          pb.ClientEndpoint,
 		TerminalChecks:          int(pb.TerminalChecks),
 		HandoffReason:           pb.HandoffReason,
+	}
+	if pb.SeasonSourceInfoHash != "" || pb.SeasonSourceNumber != 0 {
+		e.SeasonSource = &SeasonSource{InfoHash: pb.SeasonSourceInfoHash, Season: int(pb.SeasonSourceNumber)}
 	}
 
 	// Timestamps

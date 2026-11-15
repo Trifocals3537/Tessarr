@@ -1120,6 +1120,14 @@ func (d *Downloader) processStrm(ctx context.Context, torrent *storage.Entry) er
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	streamSource := torrent
+	if torrent.SeasonSource != nil || torrent.FileScopeRestricted {
+		source, err := d.manager.seasonSource(torrent)
+		if err != nil {
+			return err
+		}
+		streamSource = source
+	}
 	files := torrent.GetActiveFiles()
 	d.logger.Info().Msgf("Creating .strm for %d files ...", len(files))
 
@@ -1171,7 +1179,7 @@ func (d *Downloader) processStrm(ctx context.Context, torrent *storage.Entry) er
 			}
 			strmFilePath = safePath
 		}
-		streamURL, err := torrentSTRMURL(d.strmURL, torrent, file)
+		streamURL, err := torrentSTRMURL(d.strmURL, streamSource, file)
 		if err != nil {
 			continue
 		}

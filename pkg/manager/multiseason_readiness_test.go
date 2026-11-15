@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
+	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -464,5 +466,69 @@ func TestMultiSeasonNamesDescribeTheirOwnSeason(t *testing.T) {
 				t.Fatalf("season name %q, want %q", got, tc.want)
 			}
 		})
+	}
+}
+
+func TestMultiSeasonSTRMUsesParentSource(t *testing.T) {
+	for _, naming := range []config.WebDavFolderNaming{config.WebDavUseFileName, config.WebDavUseOriginalName, config.WebdavUseHash} {
+		for _, phase := range []string{"fanout", "retry"} {
+			t.Run(string(naming)+"/"+phase, func(t *testing.T) {
+				m, parent := newMultiSeasonReadinessManager(t)
+				m.config.FolderNaming = naming
+				parent.Action = config.DownloadActionStrm
+				m.downloader.strmURL = "https://tessarr.invalid/base"
+				// Materialize the source's actual name index under this policy,
+				// so URL resolution checks the same backend used by WebDAV.
+				if err := m.storage.AddOrUpdate(parent); err != nil {
+					t.Fatal(err)
+				}
+				wantOutputs := 2
+				if phase == "fanout" {
+					if err := m.downloader.download(t.Context(), parent); err != nil {
+						t.Fatal(err)
+					}
+				} else {
+					child, _ := seasonReadinessChild(t, m, parent)
+					if err := m.queue.Add(child); err != nil {
+						t.Fatal(err)
+					}
+					restored, err := m.queue.GetTorrent(child.InfoHash)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if err := m.processAction(t.Context(), restored); err != nil {
+						t.Fatal(err)
+					}
+					wantOutputs = 1
+				}
+				outputs := 0
+				err := filepath.WalkDir(m.config.DownloadFolder, func(path string, item fs.DirEntry, err error) error {
+					if err != nil || item.IsDir() || filepath.Ext(path) != ".strm" {
+						return err
+					}
+					outputs++
+					data, err := os.ReadFile(path)
+					if err != nil {
+						return err
+					}
+					stream, err := url.Parse(strings.TrimSpace(string(data)))
+					if err != nil || stream.Host != "tessarr.invalid" {
+						return fmt.Errorf("invalid generated stream URL %q: %v", data, err)
+					}
+					parts := strings.Split(strings.TrimPrefix(stream.Path, "/base/webdav/stream/__all__/"), "/")
+					if len(parts) != 2 {
+						return fmt.Errorf("unexpected stream route %q", stream.Path)
+					}
+					source, err := m.GetEntryByName(parts[0], parts[1])
+					if err != nil || source.InfoHash != parent.InfoHash {
+						return fmt.Errorf("season stream points outside its authoritative parent: %q: %v", stream.Path, err)
+					}
+					return nil
+				})
+				if err != nil || outputs != wantOutputs {
+					t.Fatalf("season stream outputs=%d, want %d: %v", outputs, wantOutputs, err)
+				}
+			})
+		}
 	}
 }

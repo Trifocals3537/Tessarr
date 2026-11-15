@@ -98,7 +98,9 @@ checks the derived child identity, active placement, complete season file scope,
 stable canonical file IDs, paths, sizes, byte ranges and provider file mappings.
 Children retain independent copies of canonical files, including their IDs.
 Retries resolve the parent's mount folder under every mount-naming policy and
-do not publish a second main entry for the synthetic child hash.
+do not publish a second main entry for the synthetic child hash. Season STRM
+URLs likewise resolve to the parent's stored folder on initial fan-out and on
+retry; the output files and ownership markers still belong to the child.
 
 Readiness reloads and validates that source after the sampled reads. A deleted
 source, changed placement or scope, or a same-content republish during the check

@@ -111,7 +111,9 @@ func rar5GroupBoundaryFailure(cause error, infos []*rar5VolumeInfo, members [][]
 }
 
 func rarDiagnosticMemberChain(order []int, members [][]*RARFileEntry, target *RARFileEntry, missingFirst bool) bool {
-	if target.Name == "" || len(target.Name) > maxRARDiagnosticName || target.UncompressedSize <= 0 {
+	// IsStored=false does not retain the actual compressed method. Only stored
+	// members have a known method that can be compared within/between groups.
+	if !target.IsStored || target.Name == "" || len(target.Name) > maxRARDiagnosticName || target.UncompressedSize <= 0 {
 		return false
 	}
 	previous := -1
@@ -164,7 +166,7 @@ func rarGroupDiagnostics(failures []rarGroupFailure) []error {
 		}
 		boundary := rarBoundaryFailure(failure.err)
 		if boundary == nil || (boundary.version != RARVersion4 && boundary.version != RARVersion5) ||
-			boundary.member.name == "" || len(boundary.member.name) > maxRARDiagnosticName || boundary.member.size <= 0 {
+			!boundary.member.stored || boundary.member.name == "" || len(boundary.member.name) > maxRARDiagnosticName || boundary.member.size <= 0 {
 			continue
 		}
 		key := rarDiagnosticBase(group.BaseName, true)

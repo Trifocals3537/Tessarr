@@ -2,6 +2,7 @@ package parser
 
 import (
 	"bytes"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -278,6 +279,65 @@ func TestRARGroupDiagnosticDoesNotBlockOtherValidGroup(t *testing.T) {
 	}
 }
 
+func TestRARGroupDiagnosticSkipsUnverifiedCompressedMethods(t *testing.T) {
+	for _, version := range []int{4, 5} {
+		t.Run(fmt.Sprintf("RAR%d", version), func(t *testing.T) {
+			volumes, _ := rarGroupDiagnosticVolumes(t, version, false, 3, 'A')
+			for index := range volumes {
+				// Actual header methods 1 and 2 both become IsStored=false.
+				// The synthetic payload is never decompressed or admitted.
+				method := byte(1)
+				if index > 0 {
+					method = 2
+				}
+				if version == 4 {
+					start := len(RAR4Signature) + 13 // Skip marker and main header.
+					header := volumes[index][start:]
+					size := int(binary.LittleEndian.Uint16(header[5:]))
+					header[7+18] = RAR4CompressionMethodStore + method
+					binary.LittleEndian.PutUint16(header, uint16(crc32.ChecksumIEEE(header[2:size])))
+				} else {
+					flags, next := uint64(16), uint64(1)
+					main := []byte{1}
+					if index > 0 {
+						flags |= 8
+						main = []byte{3, byte(index)}
+					}
+					if index == 2 {
+						flags, next = 8, 0
+					}
+					payload := bytes.Repeat([]byte{'X'}, 60+index)
+					body := binary.AppendUvarint(nil, 0) // No data CRC field.
+					body = binary.AppendUvarint(body, 183)
+					body = append(body, 0) // Attributes.
+					body = binary.AppendUvarint(body, uint64(method)<<7)
+					body = append(body, 0, 9) // OS and member name length.
+					body = append(body, "video.mkv"...)
+					volumes[index] = rar5OrderFixtureArchive(t, false,
+						rar5OrderFixtureBlock{header: integrityRAR5Block(1, 0, 0, main)},
+						rar5OrderFixtureBlock{header: integrityRAR5Block(2, RAR5HeaderFlagDataArea|flags, len(payload), body), data: payload},
+						rar5OrderFixtureBlock{header: integrityRAR5Block(5, 0, 0, []byte{byte(next)})},
+					)
+				}
+			}
+			p := rarGroupDiagnosticParser(t, volumes)
+			var logs bytes.Buffer
+			p.logger = zerolog.New(zerolog.SyncWriter(&logs))
+			entry, groups, err := p.Parse(t.Context(), "Compressed.nzb", rarGroupDiagnosticNZB(volumes, []string{"Demo-Release.part01.rar", "Demo - Release.r00", "Demo - Release.r01"}))
+			if err != nil || len(groups) != 2 {
+				t.Fatalf("compressed fixture grouping: groups=%d err=%v", len(groups), err)
+			}
+			parsed, err := p.Process(t.Context(), entry, groups)
+			if err == nil || parsed != nil {
+				t.Fatal("incompatible compressed groups admitted")
+			}
+			if strings.Contains(err.Error(), rarGroupDiagnosticMessage) || strings.Contains(logs.String(), rarGroupDiagnosticMessage) {
+				t.Fatalf("unverified compressed methods suggested as related: %v", err)
+			}
+		})
+	}
+}
+
 func rarDiagnosticTestPair() []rarGroupFailure {
 	var failures []rarGroupFailure
 	for index, base := range []string{"Private-Demo", "Private - Demo"} {
@@ -302,6 +362,10 @@ func TestRARGroupDiagnosticRequiresComplementaryEvidence(t *testing.T) {
 		{"different member", func(f []rarGroupFailure) { rarBoundaryFailure(f[1].err).member.name = "other.mkv" }},
 		{"different size", func(f []rarGroupFailure) { rarBoundaryFailure(f[1].err).member.size++ }},
 		{"different method", func(f []rarGroupFailure) { rarBoundaryFailure(f[1].err).member.stored = false }},
+		{"both compressed methods unverified", func(f []rarGroupFailure) {
+			rarBoundaryFailure(f[0].err).member.stored = false
+			rarBoundaryFailure(f[1].err).member.stored = false
+		}},
 		{"different encryption", func(f []rarGroupFailure) { rarBoundaryFailure(f[1].err).member.encrypted = true }},
 		{"different format", func(f []rarGroupFailure) { rarBoundaryFailure(f[1].err).version = RARVersion5 }},
 		{"unknown format", func(f []rarGroupFailure) { rarBoundaryFailure(f[1].err).version = RARVersionUnknown }},
@@ -379,7 +443,7 @@ func TestRARGroupDiagnosticBoundsAndErrorPreservation(t *testing.T) {
 }
 
 func TestRAR5GroupBoundaryEvidenceRejectsConflicts(t *testing.T) {
-	for _, tc := range []string{"control", "prefix", "scrambled", "duplicate", "gap", "premature end", "missing both", "not multivolume", "nil metadata", "inconsistent size", "inconsistent method", "inconsistent encryption", "broken split", "duplicate member", "overflow", "oversized index set", "oversized member set"} {
+	for _, tc := range []string{"control", "prefix", "scrambled", "duplicate", "gap", "premature end", "missing both", "not multivolume", "nil metadata", "inconsistent size", "inconsistent method", "all compressed", "inconsistent encryption", "broken split", "duplicate member", "overflow", "oversized index set", "oversized member set"} {
 		t.Run(tc, func(t *testing.T) {
 			infos := []*rar5VolumeInfo{{number: 1, multi: true, next: true}, {number: 2, multi: true}}
 			members := [][]*RARFileEntry{
@@ -411,6 +475,8 @@ func TestRAR5GroupBoundaryEvidenceRejectsConflicts(t *testing.T) {
 				members[1][0].UncompressedSize++
 			case "inconsistent method":
 				members[1][0].IsStored = false
+			case "all compressed":
+				members[0][0].IsStored, members[1][0].IsStored = false, false
 			case "inconsistent encryption":
 				members[1][0].IsEncrypted = true
 			case "broken split":

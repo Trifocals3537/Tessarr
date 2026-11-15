@@ -12,9 +12,11 @@ also included in the returned processing error when no group produces a valid
 file. If another group succeeds, the existing partial-success policy remains in
 effect and the hint is available in the log.
 
-The hint requires two RAR groups of the same format with matching internal
-member names, declared sizes, storage methods and encryption flags, but opposite
-incomplete-chain boundaries. Basenames must differ only by whitespace or the
+The hint requires two RAR groups of the same format with matching stored
+(uncompressed) member names, declared sizes and encryption flags, but opposite
+incomplete-chain boundaries. Compressed members are excluded: the parser's
+`IsStored=false` flag does not retain their actual compression method, so it
+cannot verify that those methods agree. Basenames must differ only by whitespace or the
 separators dot, hyphen and underscore. This comparison is used only for the
 diagnostic; it never changes the grouping key. Counts refer to NZB volume entries,
 not proof that every article or byte is present.
@@ -48,4 +50,6 @@ volume last in NZB order, a one-volume/fourteen-volume partition, RAR4 and plain
 or encrypted RAR5 headers. Complete controls include full and random byte
 readback. Separate valid archives, mixed success/failure, missing/duplicate/corrupt
 volumes, conflicting metadata, bounded output and original error propagation are
-covered without live providers, releases or media.
+covered without live providers, releases or media. Synthetic CRC-valid headers
+using incompatible compressed methods verify that neither RAR4 nor RAR5 emits
+the hint for unverified compressed members.

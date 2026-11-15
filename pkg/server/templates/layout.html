@@ -204,6 +204,8 @@
 <script src="{{.URLBase}}assets/js/config.js"></script>
 {{ else if eq .Page "setup" }}
 <script src="{{.URLBase}}assets/js/setup.js"></script>
+{{ else if eq .Page "stats" }}
+<script src="{{.URLBase}}assets/js/nzb-admission.js"></script>
 {{ end }}
 </body>
 </html>

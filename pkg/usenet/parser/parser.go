@@ -108,7 +108,7 @@ func (p *NZBParser) Parse(ctx context.Context, filename string, content []byte) 
 	// Parse raw XML
 	raw, err := nzbparser.Parse(bytes.NewReader(content))
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to parse NZB content: %w", err)
+		return nil, nil, fmt.Errorf("failed to parse NZB content: %w", NewInvalidNZBError(err))
 	}
 
 	// Create base NZB structure
@@ -318,7 +318,10 @@ func (p *NZBParser) groupFiles(ctx context.Context, files nzbparser.NzbFiles) (m
 	groups = p.mergeObfuscatedRarGroups(groups)
 
 	if len(groups) == 0 {
-		return groups, detectionFailures.unavailableError()
+		if unavailable := detectionFailures.unavailableError(); unavailable != nil {
+			return groups, unavailable
+		}
+		return groups, detectionFailures.rejectionError()
 	}
 	return groups, nil
 }

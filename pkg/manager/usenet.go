@@ -113,6 +113,7 @@ func (m *Manager) AddNewNZB(ctx context.Context, req *ImportRequest) (string, er
 		req.Arr.Name,
 	)
 	if err != nil {
+		m.recordNZBParseRejection(err)
 		parseErr := fmt.Errorf("usenet parse failed: %w", err)
 		if cleanupErr := cleanupRejected(req.Id); cleanupErr != nil {
 			return "", errors.Join(parseErr, fmt.Errorf("cleanup rejected NZB state: %w", cleanupErr))

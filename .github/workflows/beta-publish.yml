@@ -1,0 +1,135 @@
+name: Guarded Beta Publishing
+run-name: Beta ${{ inputs.mode }} at ${{ inputs.expected_sha }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: Validate only, or explicitly publish the checked beta image
+        type: choice
+        options: [validate, publish]
+        default: validate
+        required: true
+      expected_sha:
+        description: Full 40-character current beta revision
+        type: string
+        required: true
+      ci_run_id:
+        description: Latest successful CI run ID for this exact beta revision
+        type: string
+        required: true
+
+permissions:
+  contents: read
+  actions: read
+
+# Shared with versioned beta/RC releases. Never cancel an active publication.
+concurrency:
+  group: beta-publishing
+  cancel-in-progress: false
+
+env:
+  GHCR_IMAGE: ghcr.io/trifocals3537/tessarr
+  BETA_VERSION_BASE: "2.6.0"
+
+jobs:
+  validate:
+    name: Verify exact beta revision and CI
+    runs-on: ubuntu-24.04
+    outputs:
+      sha: ${{ steps.gate.outputs.sha }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: "22"
+      - name: Verify publication request
+        id: gate
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          BETA_MODE: ${{ inputs.mode }}
+          BETA_EXPECTED_SHA: ${{ inputs.expected_sha }}
+          BETA_CI_RUN_ID: ${{ inputs.ci_run_id }}
+        run: node scripts/beta-publish-gate.mjs
+
+  publish:
+    name: Build and publish approved beta image
+    needs: validate
+    if: >-
+      inputs.mode == 'publish' &&
+      github.repository_id == '1426317456' &&
+      github.ref == 'refs/heads/beta'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      actions: read
+      packages: write
+    env:
+      BETA_MODE: publish
+      BETA_EXPECTED_SHA: ${{ inputs.expected_sha }}
+      BETA_CI_RUN_ID: ${{ inputs.ci_run_id }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ needs.validate.outputs.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: "22"
+      - name: Recheck before building
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: node scripts/beta-publish-gate.mjs
+      - name: Calculate unique beta version
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$BETA_VERSION_BASE" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          echo "version=${BETA_VERSION_BASE}-beta.${GITHUB_RUN_ID}.${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+      - name: Install OCI image transfer tool
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends skopeo
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4
+      - name: Generate image metadata
+        id: metadata
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6
+        with:
+          images: ${{ env.GHCR_IMAGE }}
+          tags: |
+            type=raw,value=beta
+            type=raw,value=${{ steps.version.outputs.version }}
+          labels: |
+            org.opencontainers.image.title=Tessarr
+            org.opencontainers.image.description=Self-hosted debrid and Usenet media bridge with qBittorrent and SABnzbd-compatible APIs
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.url=https://github.com/${{ github.repository }}
+            org.opencontainers.image.documentation=https://github.com/${{ github.repository }}/blob/${{ github.sha }}/README.md
+            org.opencontainers.image.authors=Tessarr contributors
+            org.opencontainers.image.licenses=MIT
+      - name: Build multi-platform OCI archive without publishing
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: false
+          outputs: type=oci,dest=${{ runner.temp }}/beta-image.tar
+          build-args: |
+            VERSION=${{ steps.version.outputs.version }}
+            CHANNEL=beta
+          tags: ${{ steps.metadata.outputs.tags }}
+          labels: ${{ steps.metadata.outputs.labels }}
+          cache-from: type=gha,scope=beta
+          cache-to: type=gha,scope=beta,mode=max
+          provenance: mode=max
+          sbom: true
+      - name: Revalidate and publish OCI archive
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          BETA_VERSION: ${{ steps.version.outputs.version }}
+        run: bash scripts/publish-beta-image.sh "$RUNNER_TEMP/beta-image.tar" "$BETA_VERSION" beta

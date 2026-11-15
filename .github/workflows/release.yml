@@ -7,12 +7,21 @@ on:
         description: Release tag, for example v2.6.0 or v2.6.0-beta.1
         required: true
         type: string
+      expected_sha:
+        description: Beta/RC only - full current beta revision
+        required: false
+        type: string
+      ci_run_id:
+        description: Beta/RC only - latest successful CI run for that revision
+        required: false
+        type: string
 
 permissions:
   contents: read
+  actions: read
 
 concurrency:
-  group: release-${{ github.ref }}
+  group: ${{ github.ref == 'refs/heads/beta' && 'beta-publishing' || format('release-{0}', github.ref) }}
   cancel-in-progress: false
 
 env:
@@ -80,6 +89,21 @@ jobs:
           echo "channel=${channel}" >> "${GITHUB_OUTPUT}"
           echo "tag=${tag}" >> "${GITHUB_OUTPUT}"
           echo "Releasing ${tag} from ${GITHUB_REF_NAME} at ${GITHUB_SHA}"
+
+      - name: Set up Node for beta/RC approval
+        if: steps.metadata.outputs.channel != 'stable'
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: "22"
+
+      - name: Require exact successful beta CI
+        if: steps.metadata.outputs.channel != 'stable'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          BETA_MODE: publish
+          BETA_EXPECTED_SHA: ${{ inputs.expected_sha }}
+          BETA_CI_RUN_ID: ${{ inputs.ci_run_id }}
+        run: node scripts/beta-publish-gate.mjs
 
   build-linux:
     name: Linux ${{ matrix.label }}
@@ -315,9 +339,33 @@ jobs:
       - build-darwin
     permissions:
       contents: read
+      actions: read
       packages: write
+    env:
+      BETA_MODE: publish
+      BETA_EXPECTED_SHA: ${{ inputs.expected_sha }}
+      BETA_CI_RUN_ID: ${{ inputs.ci_run_id }}
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Set up Node for beta/RC approval
+        if: needs.prepare.outputs.channel != 'stable'
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: "22"
+
+      - name: Recheck beta before building its image
+        if: needs.prepare.outputs.channel != 'stable'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: node scripts/beta-publish-gate.mjs
+
+      - name: Install OCI image transfer tool
+        if: needs.prepare.outputs.channel != 'stable'
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends skopeo
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4
@@ -326,6 +374,7 @@ jobs:
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4
 
       - name: Login to GitHub Container Registry
+        if: needs.prepare.outputs.channel == 'stable'
         uses: docker/login-action@abd2ef45e78c5afb21d64d4ca52ee8550d9572c7 # v4
         with:
           registry: ghcr.io
@@ -350,12 +399,13 @@ jobs:
             org.opencontainers.image.authors=Tessarr contributors
             org.opencontainers.image.licenses=MIT
 
-      - name: Build and push multi-platform image
+      - name: Build multi-platform image
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
         with:
           context: .
           platforms: linux/amd64,linux/arm64
-          push: true
+          push: ${{ needs.prepare.outputs.channel == 'stable' }}
+          outputs: ${{ needs.prepare.outputs.channel != 'stable' && format('type=oci,dest={0}/beta-image.tar', runner.temp) || '' }}
           build-args: |
             VERSION=${{ needs.prepare.outputs.version }}
             CHANNEL=${{ needs.prepare.outputs.channel }}
@@ -365,6 +415,14 @@ jobs:
           cache-to: type=gha,scope=release,mode=max
           provenance: mode=max
           sbom: true
+
+      - name: Revalidate and publish beta/RC archive
+        if: needs.prepare.outputs.channel != 'stable'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          BETA_VERSION: ${{ needs.prepare.outputs.version }}
+          BETA_CHANNEL: ${{ needs.prepare.outputs.channel }}
+        run: bash scripts/publish-beta-image.sh "$RUNNER_TEMP/beta-image.tar" "$BETA_VERSION" "$BETA_CHANNEL"
 
   release:
     name: Publish GitHub release

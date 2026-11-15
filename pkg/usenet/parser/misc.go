@@ -75,8 +75,13 @@ func getGroupsList(groups map[string]struct{}) []string {
 }
 
 func determineNZBName(filename string, meta map[string]string) string {
+	// A supplied release title can already be extensionless and contain dots.
+	// Only an actual NZB suffix identifies a transport filename to normalize.
+	if ext := filepath.Ext(filename); strings.EqualFold(ext, ".nzb") {
+		filename = strings.TrimSuffix(filename, ext)
+	}
 	candidates := []string{
-		strings.TrimSuffix(filename, filepath.Ext(filename)),
+		filename,
 		meta["Name"],
 		meta["title"],
 	}

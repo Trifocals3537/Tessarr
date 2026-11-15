@@ -51,11 +51,15 @@ func rar5OrderFixtureArchive(t *testing.T, encryptedHeaders bool, blocks ...rar5
 	return archive
 }
 
-func rar5OrderFixtureFile(name string, payload []byte, logicalSize int, splitFlags uint64, extra []byte) rar5OrderFixtureBlock {
+func rar5OrderFixtureFile(name string, payload []byte, logicalSize int, splitFlags uint64, extra []byte, dataCRC ...uint32) rar5OrderFixtureBlock {
 	body := binary.AppendUvarint(nil, RAR5FileFlagHasCRC32)
 	body = binary.AppendUvarint(body, uint64(logicalSize))
 	body = append(body, 0) // attributes
-	body = binary.LittleEndian.AppendUint32(body, crc32.ChecksumIEEE(payload))
+	checksum := crc32.ChecksumIEEE(payload)
+	if len(dataCRC) > 0 {
+		checksum = dataCRC[0]
+	}
+	body = binary.LittleEndian.AppendUint32(body, checksum)
 	body = append(body, 0, 0) // stored, host OS
 	body = binary.AppendUvarint(body, uint64(len(name)))
 	body = append(body, name...)
@@ -74,11 +78,11 @@ func rar5OrderFixtureFile(name string, payload []byte, logicalSize int, splitFla
 	return rar5OrderFixtureBlock{header: checkedRAR5HeaderFixture(header, nil), data: payload}
 }
 
-func rar5OrderFixtureVolume(t *testing.T, main []byte, endFlags uint64, payload []byte, logicalSize int, splitFlags uint64, encryptedHeaders bool) []byte {
+func rar5OrderFixtureVolume(t *testing.T, main []byte, endFlags uint64, payload []byte, logicalSize int, splitFlags uint64, encryptedHeaders bool, dataCRC ...uint32) []byte {
 	t.Helper()
 	return rar5OrderFixtureArchive(t, encryptedHeaders,
 		rar5OrderFixtureBlock{header: integrityRAR5Block(RAR5HeaderTypeMain, 0, 0, main)},
-		rar5OrderFixtureFile("video.mkv", payload, logicalSize, splitFlags, nil),
+		rar5OrderFixtureFile("video.mkv", payload, logicalSize, splitFlags, nil, dataCRC...),
 		rar5OrderFixtureBlock{header: integrityRAR5Block(RAR5HeaderTypeEndOfArc, 0, 0, binary.AppendUvarint(nil, endFlags))},
 	)
 }
@@ -137,7 +141,11 @@ func TestRAR5EmbeddedVolumeOrderReadback(t *testing.T) {
 					next = 1
 				}
 				end := at + 137 + index*23
-				volumes = append(volumes, rar5OrderFixtureVolume(t, main, next, want[at:end], len(want), split, encrypted))
+				checksum := crc32.ChecksumIEEE(want[at:end])
+				if index == len(labels)-1 {
+					checksum = crc32.ChecksumIEEE(want)
+				}
+				volumes = append(volumes, rar5OrderFixtureVolume(t, main, next, want[at:end], len(want), split, encrypted, checksum))
 				at = end
 			}
 			p, group := rar5OrderFixtureGroup(t, volumes, labels, 17)
@@ -298,9 +306,13 @@ func TestRAR5EmbeddedOrderRejectsInvalidArchiveSets(t *testing.T) {
 				for index := range 3 {
 					payload := bytes.Repeat([]byte{byte('A' + index)}, 64+index)
 					want = append(want, payload...)
+					checksum := crc32.ChecksumIEEE(payload)
+					if index == 2 {
+						checksum = crc32.ChecksumIEEE(want)
+					}
 					blocks := []rar5OrderFixtureBlock{
 						{header: integrityRAR5Block(RAR5HeaderTypeMain, 0, 0, mains[index])},
-						rar5OrderFixtureFile("video.mkv", payload, totals[index], splits[index], nil),
+						rar5OrderFixtureFile("video.mkv", payload, totals[index], splits[index], nil, checksum),
 						{header: integrityRAR5Block(RAR5HeaderTypeEndOfArc, 0, 0, binary.AppendUvarint(nil, tails[index]))},
 					}
 					if index == 1 {
@@ -372,9 +384,13 @@ func TestRAR5EmbeddedOrderPreservesEncryptedData(t *testing.T) {
 					split |= RAR5HeaderFlagSplitAfter
 					next = 1
 				}
+				checksum := crc32.ChecksumIEEE(ciphertext[bounds[index]:bounds[index+1]])
+				if index == 2 {
+					checksum = crc32.ChecksumIEEE(plain)
+				}
 				volumes = append(volumes, rar5OrderFixtureArchive(t, encryptedHeaders,
 					rar5OrderFixtureBlock{header: integrityRAR5Block(RAR5HeaderTypeMain, 0, 0, main)},
-					rar5OrderFixtureFile("video.mkv", ciphertext[bounds[index]:bounds[index+1]], len(plain), split, extra),
+					rar5OrderFixtureFile("video.mkv", ciphertext[bounds[index]:bounds[index+1]], len(plain), split, extra, checksum),
 					rar5OrderFixtureBlock{header: integrityRAR5Block(RAR5HeaderTypeEndOfArc, 0, 0, binary.AppendUvarint(nil, next))},
 				))
 			}
@@ -393,7 +409,7 @@ func TestRAR5EmbeddedOrderRetainsLegacyPerFileGeometry(t *testing.T) {
 	want := append(bytes.Repeat([]byte{'A'}, 100), bytes.Repeat([]byte{'B'}, 67)...)
 	volumes := [][]byte{
 		rar5OrderFixtureVolume(t, []byte{1}, 1, want[:100], len(want), 16, false),
-		rar5OrderFixtureVolume(t, []byte{3, 1}, 0, want[100:], len(want), 8, false),
+		rar5OrderFixtureVolume(t, []byte{3, 1}, 0, want[100:], len(want), 8, false, crc32.ChecksumIEEE(want)),
 	}
 	p, group := rar5OrderFixtureGroup(t, volumes, []int{1, 0}, 10000)
 	group.fileMeta = nil

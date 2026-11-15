@@ -110,11 +110,15 @@ func integrityRAR5Block(kind, flags uint64, dataSize int, data []byte) []byte {
 	return append(binary.LittleEndian.AppendUint32(nil, crc32.ChecksumIEEE(checked)), checked...)
 }
 
-func integrityRAR5Volume(payload []byte, total int, splitFlags uint64) []byte {
+func integrityRAR5Volume(payload []byte, total int, splitFlags uint64, dataCRC ...uint32) []byte {
 	body := []byte{RAR5FileFlagHasCRC32}
 	body = binary.AppendUvarint(body, uint64(total))
 	body = append(body, 0) // attributes
-	body = binary.LittleEndian.AppendUint32(body, crc32.ChecksumIEEE(payload))
+	checksum := crc32.ChecksumIEEE(payload)
+	if len(dataCRC) > 0 {
+		checksum = dataCRC[0]
+	}
+	body = binary.LittleEndian.AppendUint32(body, checksum)
 	body = append(body, 0, 0, 9) // stored, host OS, name length
 	body = append(body, "video.mkv"...)
 	main := []byte{RAR5MainFlagVolume}
@@ -145,7 +149,7 @@ func TestRARCompleteMultiVolumeRandomReads(t *testing.T) {
 			if version == 4 {
 				volumes = [][]byte{integrityRAR4Volume(payload[:6103], uint32(len(payload)), 2), integrityRAR4Volume(payload[6103:], uint32(len(payload)), 1)}
 			} else {
-				volumes = [][]byte{integrityRAR5Volume(payload[:6103], len(payload), 16), integrityRAR5Volume(payload[6103:], len(payload), 8)}
+				volumes = [][]byte{integrityRAR5Volume(payload[:6103], len(payload), 16), integrityRAR5Volume(payload[6103:], len(payload), 8, crc32.ChecksumIEEE(payload))}
 			}
 			articles := make(map[string][]byte)
 			group := &FileGroup{BaseName: "release", Type: storage.NZBFileTypeRar}

@@ -374,6 +374,11 @@ func (sr *StreamingReader) readAtEncrypted(ctx context.Context, p []byte, off in
 	if err == io.EOF && copied == len(p) {
 		return copied, nil
 	}
+	// A complete aligned ciphertext read can still leave the caller's
+	// original request short when it crosses the physical member boundary.
+	if copied < len(p) && err == nil {
+		err = io.EOF
+	}
 
 	return copied, err
 }

@@ -11,6 +11,7 @@ import (
 
 	"github.com/Tensai75/nzbparser"
 	"github.com/Trifocals3537/tessarr/internal/crypto"
+	"github.com/Trifocals3537/tessarr/internal/nntp"
 	"github.com/Trifocals3537/tessarr/pkg/storage"
 	streamreader "github.com/Trifocals3537/tessarr/pkg/usenet/fs/reader"
 	"github.com/rs/zerolog"
@@ -201,8 +202,8 @@ func TestEncryptedRAR5MixedDataThroughFragmentedArticles(t *testing.T) {
 				}
 				// Cross the physical end and check that no following header bytes leak.
 				crossing := make([]byte, 2)
-				if n, err := reader.ReadAt(crossing, int64(len(got)-1)); n != 1 || (err != nil && !errors.Is(err, io.EOF)) || crossing[0] != got[len(got)-1] {
-					t.Fatalf("cross-member read: bytes=%d err=%v", n, err)
+				if n, err := reader.ReadAt(crossing, int64(len(got)-1)); n != 1 || !errors.Is(err, io.EOF) || crossing[0] != got[len(got)-1] {
+					t.Fatalf("cross-member read %q (encrypted=%v): bytes=%d err=%v", file.Name, file.IsEncrypted, n, err)
 				}
 			}
 		})
@@ -220,5 +221,30 @@ func TestEncryptedRAR5MixedDataRejectsEveryTruncation(t *testing.T) {
 		if err == nil || result != nil {
 			t.Fatalf("truncated archive returned partial success at %d/%d: %+v %v", end, len(archive), result, err)
 		}
+	}
+}
+
+func TestStreamingReaderEOFMissingArticle(t *testing.T) {
+	for _, encrypted := range []bool{false, true} {
+		t.Run(fmt.Sprint(encrypted), func(t *testing.T) {
+			p := newContentTestParser(t, map[string][]byte{})
+			segments := []streamreader.SegmentMeta{{MessageID: "missing@fixture.invalid", Number: 1, Bytes: 64, StartOffset: 0, EndOffset: 63}}
+			reader, err := streamreader.NewStreamingReaderWithEncryption(t.Context(), p.manager, segments,
+				streamreader.EncryptionConfig{Enabled: encrypted, Key: rar5HeaderTestKey, IV: rar5HeaderTestIV},
+				streamreader.WithDiskPath(t.TempDir()), streamreader.WithPrefetchAhead(0), streamreader.WithMaxConnections(1),
+				func(c *streamreader.Config) { c.MaxRetries = 1 })
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() {
+				if err := reader.Close(); err != nil {
+					t.Error(err)
+				}
+			})
+			got := bytes.Repeat([]byte{0xcc}, 2)
+			if n, err := reader.ReadAt(got, 63); n != 0 || !nntp.IsArticleNotFoundError(err) || errors.Is(err, io.EOF) || !bytes.Equal(got, []byte{0xcc, 0xcc}) {
+				t.Fatalf("NNTP failure became EOF/data: n=%d err=%v data=%x", n, err, got)
+			}
+		})
 	}
 }

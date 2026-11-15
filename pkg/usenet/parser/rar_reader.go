@@ -252,7 +252,10 @@ func (p *RARParser) parseRAR5Stream(stream *rarReader, volumeIndex int, volumeNa
 			}
 
 			// Derive key from password
-			keys := crypto.DeriveKeys([]byte(password), encHeader.Salt, encHeader.KdfCount)
+			keys, err := crypto.DeriveKeys([]byte(password), encHeader.Salt, encHeader.KdfCount)
+			if err != nil {
+				return nil, fmt.Errorf("derive RAR5 archive key: %w", err)
+			}
 
 			// Verify password if check is present
 			if encHeader.HasPwCheck {

@@ -22,7 +22,10 @@ const rar5HeaderFixturePassword = "synthetic-fixture-password"
 func encryptedRAR5ArchiveFixture(t *testing.T, payload []byte, corruptEnd bool) ([]byte, int64) {
 	t.Helper()
 	salt := bytes.Repeat([]byte{0x33}, 16)
-	keys := crypto.DeriveKeys([]byte(rar5HeaderFixturePassword), salt, 0)
+	keys, err := crypto.DeriveKeys([]byte(rar5HeaderFixturePassword), salt, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
 	// Public synthetic password-check fixture; a low KDF count keeps tests fast.
 	encData := append([]byte{0, 1, 0}, salt...)
 	encData = append(encData, keys.PwCheck...)

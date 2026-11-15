@@ -51,15 +51,18 @@ func (f articleProbeFailures) unavailableError() error {
 	if f.count == 0 || !f.allArticlesMissing {
 		return nil
 	}
-	return &articlesUnavailableError{count: f.count, cause: f.first}
+	return &ArticlesUnavailableError{count: f.count, cause: f.first}
 }
 
-type articlesUnavailableError struct {
+// ArticlesUnavailableError represents parser-confirmed release unavailability,
+// rather than an individual missing probe. Its original message and cause remain
+// available to existing errors.Is/errors.As callers.
+type ArticlesUnavailableError struct {
 	count int
 	cause error
 }
 
-func (e *articlesUnavailableError) Error() string {
+func (e *ArticlesUnavailableError) Error() string {
 	return fmt.Sprintf(
 		"%v: %d required article probe(s) failed; first failure: %v",
 		ErrNZBArticlesUnavailable,
@@ -68,10 +71,10 @@ func (e *articlesUnavailableError) Error() string {
 	)
 }
 
-func (e *articlesUnavailableError) Is(target error) bool {
+func (e *ArticlesUnavailableError) Is(target error) bool {
 	return target == ErrNZBArticlesUnavailable
 }
 
-func (e *articlesUnavailableError) Unwrap() error {
+func (e *ArticlesUnavailableError) Unwrap() error {
 	return e.cause
 }

@@ -33,8 +33,12 @@ const recoveryNameNZB = `<?xml version="1.0" encoding="UTF-8"?>
 var recoveryNameTLSOnce sync.Once
 var recoveryNameTLSCertificate tls.Certificate
 
-func newNZBRecoveryNameTestManager(t *testing.T) *Manager {
+func newNZBRecoveryNameTestManager(t *testing.T, statCodes ...int) *Manager {
 	t.Helper()
+	statCode := 223
+	if len(statCodes) > 0 {
+		statCode = statCodes[0]
+	}
 	config.Reset()
 	t.Cleanup(config.Reset)
 	m := newQueueRecoveryTestManager(t)
@@ -90,7 +94,11 @@ func newNZBRecoveryNameTestManager(t *testing.T) *Manager {
 					}
 					switch strings.ToUpper(fields[0]) {
 					case "STAT":
-						err = protocol.PrintfLine("223 0 %s", fields[len(fields)-1])
+						if statCode == 223 {
+							err = protocol.PrintfLine("223 0 %s", fields[len(fields)-1])
+						} else {
+							err = protocol.PrintfLine("%d synthetic probe failure", statCode)
+						}
 					case "DATE":
 						err = protocol.PrintfLine("111 20260101000000")
 					case "QUIT":

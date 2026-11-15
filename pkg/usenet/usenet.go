@@ -541,7 +541,7 @@ func (u *Usenet) parseWithID(ctx context.Context, id, name string, content []byt
 
 	// Validate NZB content
 	if err := validateNZB(content); err != nil {
-		return nil, nil, fmt.Errorf("invalid NZB content: %w", err)
+		return nil, nil, fmt.Errorf("invalid NZB content: %w", parser.NewInvalidNZBError(err))
 	}
 
 	// Create parser with the manager

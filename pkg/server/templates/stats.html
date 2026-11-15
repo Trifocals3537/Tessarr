@@ -199,6 +199,34 @@
                 </div>
             </div>
 
+            <div class="card bg-base-100 shadow-xl mt-6">
+                <div class="card-body p-6">
+                    <h3 class="card-title text-base">
+                        <i class="bi bi-file-earmark-x text-warning"></i>
+                        NZB Rejections
+                        <span class="badge badge-outline" id="nzb-rejections-total">0</span>
+                    </h3>
+                    <p class="text-sm text-base-content/70">NZBs rejected before entering the queue. Counts reset when Tessarr restarts.</p>
+                    <p class="text-sm text-base-content/50" id="nzb-rejections-empty">No NZB parsing rejections recorded.</p>
+                    <div class="overflow-x-auto hidden" id="nzb-rejections-table">
+                        <table class="table table-sm">
+                            <thead><tr><th>Reason</th><th class="text-right">Count</th><th>Last occurrence</th></tr></thead>
+                            <tbody>
+                                <tr id="nzb-reason-articles_unavailable" class="hidden"><td>Missing articles</td><td class="text-right" id="nzb-count-articles_unavailable">0</td><td id="nzb-last-articles_unavailable">-</td></tr>
+                                <tr id="nzb-reason-invalid_nzb" class="hidden"><td>Invalid NZB</td><td class="text-right" id="nzb-count-invalid_nzb">0</td><td id="nzb-last-invalid_nzb">-</td></tr>
+                                <tr id="nzb-reason-access_denied" class="hidden"><td>Provider access denied</td><td class="text-right" id="nzb-count-access_denied">0</td><td id="nzb-last-access_denied">-</td></tr>
+                                <tr id="nzb-reason-timeout" class="hidden"><td>Request timed out</td><td class="text-right" id="nzb-count-timeout">0</td><td id="nzb-last-timeout">-</td></tr>
+                                <tr id="nzb-reason-provider_unavailable" class="hidden"><td>Provider unavailable</td><td class="text-right" id="nzb-count-provider_unavailable">0</td><td id="nzb-last-provider_unavailable">-</td></tr>
+                                <tr id="nzb-reason-cancelled" class="hidden"><td>Request cancelled</td><td class="text-right" id="nzb-count-cancelled">0</td><td id="nzb-last-cancelled">-</td></tr>
+                                <tr id="nzb-reason-mixed" class="hidden"><td>Multiple failure types</td><td class="text-right" id="nzb-count-mixed">0</td><td id="nzb-last-mixed">-</td></tr>
+                                <tr id="nzb-reason-other_parse_error" class="hidden"><td>Other parse failure</td><td class="text-right" id="nzb-count-other_parse_error">0</td><td id="nzb-last-other_parse_error">-</td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+                    <p class="text-xs text-base-content/50">Only attempts that reached NZB parsing are counted. Titles, URLs, and error details are not retained here.</p>
+                </div>
+            </div>
+
             <!-- Library Stats Section -->
             <div class="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-2 gap-6 mt-6">
                 <!-- Storage Stats -->
@@ -1230,6 +1258,34 @@
             }
         }
 
+        function updateNZBAdmissionStats(summary) {
+            summary = summary || {};
+            const safeCount = value => {
+                const number = Number(value);
+                return Number.isFinite(number) && number > 0 ? Math.floor(number) : 0;
+            };
+            const reasons = ['articles_unavailable', 'invalid_nzb', 'access_denied', 'timeout',
+                'provider_unavailable', 'cancelled', 'mixed', 'other_parse_error'];
+            const rows = Array.isArray(summary.by_reason) ? summary.by_reason.slice(0, reasons.length) : [];
+            document.getElementById('nzb-rejections-total').textContent = formatNumber(safeCount(summary.total_rejected));
+            let visible = 0;
+            for (const code of reasons) {
+                const row = rows.find(item => item && item.reason === code);
+                const count = safeCount(row && row.count);
+                let last = '-';
+                if (row && typeof row.last_rejected_at === 'string') {
+                    const date = new Date(row.last_rejected_at);
+                    if (Number.isFinite(date.getTime())) last = date.toLocaleString();
+                }
+                document.getElementById(`nzb-count-${code}`).textContent = formatNumber(count);
+                document.getElementById(`nzb-last-${code}`).textContent = last;
+                document.getElementById(`nzb-reason-${code}`).classList.toggle('hidden', count === 0);
+                if (count > 0) visible++;
+            }
+            document.getElementById('nzb-rejections-empty').classList.toggle('hidden', visible > 0);
+            document.getElementById('nzb-rejections-table').classList.toggle('hidden', visible === 0);
+        }
+
         function updateStats(stats) {
             // System overview
             const sys = stats.system || {};
@@ -1256,6 +1312,8 @@
             if (stats.queue) {
                 document.getElementById('queue-pending').textContent = formatNumber(stats.queue.pending || 0);
             }
+
+            updateNZBAdmissionStats(stats.nzb_admission);
 
             // Arr instances
             if (stats.arrs) {

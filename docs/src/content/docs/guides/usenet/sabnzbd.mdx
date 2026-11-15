@@ -95,6 +95,48 @@ Tessarr translates NZB processing status to Sabnzbd equivalents:
 | Completed | Completed | Download finished |
 | Failed | Failed | Error occurred |
 
+## NZB Rejection Diagnostics
+
+Open **Stats → Overview → NZB Rejections** to see counts and the latest occurrence
+of parsing failures before an NZB entered the queue. The same summary is available
+as `nzb_admission` in `/debug/stats`, under your configured URL base and existing
+access controls. Stats refreshes from a background snapshot; a newly rejected
+attempt may take a few seconds to appear.
+
+| Reason | Meaning |
+|--------|---------|
+| Missing articles | The parser confirmed required probe articles were unavailable. |
+| Invalid NZB | The submitted body failed NZB validation or XML parsing. |
+| Provider access denied | An NNTP authentication or permission check failed. |
+| Request timed out | Parsing encountered a timeout or expired deadline. |
+| Provider unavailable | A connection, busy-server, or connection-pool failure occurred. |
+| Request cancelled | The parsing request was cancelled. |
+| Multiple failure types | Joined errors contained different failure categories. |
+| Other parse failure | No more specific category could be established. |
+
+Counts last until Tessarr restarts. The summary retains no titles, credentials,
+URLs, article IDs, paths, response bodies, or raw error messages. It does not add
+queue/history entries or change downloader health. Successful admissions do not
+increase these counters. Only requests that reached NZB parsing are counted;
+URL-fetch errors, queue-capacity failures, and failures later in an accepted job
+remain outside this summary.
+
+### Sonarr Reports an Unknown NZB Rejection
+
+The Sonarr 4.0.20.3014 behavior recorded in [issue #22](https://github.com/Trifocals3537/tessarr/issues/22)
+can produce `SABnzbd rejected the NZB for an unknown reason` and an HTTP 409 with
+`Getting release from indexer failed`. Its [SAB adapter](https://github.com/Sonarr/Sonarr/blob/cab419ade8ac7fcab5bf80394ee492abd35d5f5a/src/NzbDrone.Core/Download/Clients/Sabnzbd/Sabnzbd.cs)
+uses the generic message when accepted IDs are empty, and its [release controller](https://github.com/Sonarr/Sonarr/blob/cab419ade8ac7fcab5bf80394ee492abd35d5f5a/src/Sonarr.Api.V3/Indexers/ReleaseController.cs)
+produces the 409. That is Sonarr's response to the release attempt.
+
+For confirmed missing articles, Tessarr preserves the existing SAB response:
+HTTP 200, `status: true`, an empty `nzo_ids` list, and a missing-articles explanation.
+Check the rejection summary's reason and time, then use Tessarr's logs to inspect
+the matching attempt. Missing articles are release-specific; access failures and
+timeouts are separate categories. A fetched HTML page or Newznab error XML counts
+as invalid input, without assuming an authentication cause. Valid NZBs served as
+generic binary content remain supported.
+
 ### NZBs Not Processing
 
 1. Verify Usenet providers configured: [Usenet Setup](../overview/)

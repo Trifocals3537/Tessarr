@@ -108,7 +108,7 @@ func (p *NZBParser) Parse(ctx context.Context, filename string, content []byte) 
 	// Parse raw XML
 	raw, err := nzbparser.Parse(bytes.NewReader(content))
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to parse NZB content: %w", err)
+		return nil, nil, fmt.Errorf("failed to parse NZB content: %w", NewInvalidNZBError(err))
 	}
 
 	// Create base NZB structure

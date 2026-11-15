@@ -153,6 +153,7 @@ type Manager struct {
 	submissionRejections        *submissionRejectionCache
 	submissionContentRejections atomic.Uint64
 	submissionRejectionHits     atomic.Uint64
+	nzbAdmissionMetrics         nzbAdmissionMetrics
 
 	// In-flight queue-processor dispatches, keyed by InfoHash, to prevent
 	// duplicate goroutines from processing the same entry when the scheduler

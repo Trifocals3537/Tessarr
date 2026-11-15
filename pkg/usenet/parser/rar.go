@@ -400,7 +400,14 @@ func (p *RARParser) parseArchive(ctx context.Context, volumes []*types.Volume, p
 		var err error
 		order, err = rar5VolumeOrder(infos)
 		if err != nil {
-			return nil, err
+			if len(results) > maxRARDiagnosticParts {
+				return nil, err
+			}
+			members := make([][]*RARFileEntry, len(results))
+			for i, result := range results {
+				members[i] = result.files
+			}
+			return nil, rar5GroupBoundaryFailure(err, infos, members)
 		}
 	}
 	var allRawFiles []*RARFileEntry
@@ -429,6 +436,9 @@ func (p *RARParser) parseArchive(ctx context.Context, volumes []*types.Volume, p
 	// Files that span multiple volumes will have multiple entries with the same name
 	files, err := p.aggregateFileParts(allRawFiles)
 	if err != nil {
+		if boundary, ok := err.(*rarBoundaryError); ok {
+			boundary.version = version
+		}
 		return nil, err
 	}
 
@@ -1343,7 +1353,7 @@ func (p *RARParser) aggregateFileParts(rawFiles []*RARFileEntry) ([]*RARFileEntr
 		existing, found := fileMap[file.Name]
 		if !found {
 			if file.SplitBefore {
-				return nil, fmt.Errorf("incomplete RAR member %q: first part is a continuation", file.Name)
+				return nil, newRARBoundaryError(fmt.Errorf("incomplete RAR member %q: first part is a continuation", file.Name), file, true)
 			}
 			copied := *file
 			copied.VolumeParts = append([]*types.RARVolumePart(nil), file.VolumeParts...)
@@ -1365,7 +1375,7 @@ func (p *RARParser) aggregateFileParts(rawFiles []*RARFileEntry) ([]*RARFileEntr
 	result := make([]*RARFileEntry, 0, len(fileMap))
 	for _, file := range fileMap {
 		if file.SplitAfter {
-			return nil, fmt.Errorf("incomplete RAR member %q: missing final volume", file.Name)
+			return nil, newRARBoundaryError(fmt.Errorf("incomplete RAR member %q: missing final volume", file.Name), file, false)
 		}
 		if file.IsStored && !file.IsDirectory && !file.IsEncrypted && file.PackedSize != file.UncompressedSize {
 			return nil, fmt.Errorf("incomplete RAR member %q: declared %d bytes, available %d", file.Name, file.UncompressedSize, file.PackedSize)

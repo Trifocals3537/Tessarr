@@ -96,6 +96,10 @@ func TestStreamingReaderAtEOFBoundaries(t *testing.T) {
 			for _, chunk := range []int{13, 17} {
 				t.Run(fmt.Sprintf("encrypted=%v/size=%d/chunk=%d", encrypted, size, chunk), func(t *testing.T) {
 					reader, plain := newEOFTestReader(t, size, chunk, encrypted)
+					readWithNilContext := func(p []byte, off int64) (int, error) {
+						//lint:ignore SA1012 Intentionally exercise this API's existing nil-context compatibility.
+						return reader.ReadAtContext(nil, p, off)
+					}
 					positions := []int64{0, int64(size / 2), int64(size - 1), int64(size), int64(size + 1), math.MaxInt64}
 					for _, boundary := range []int64{1, 15, 16, 17} {
 						if boundary < int64(size) {
@@ -105,7 +109,7 @@ func TestStreamingReaderAtEOFBoundaries(t *testing.T) {
 					for _, off := range positions {
 						for _, length := range []int{0, 1, 2, 15, 16, 17, size, size + 1} {
 							assertEOFRead(t, reader.ReadAt, plain, off, length)
-							assertEOFRead(t, func(p []byte, off int64) (int, error) { return reader.ReadAtContext(nil, p, off) }, plain, off, length)
+							assertEOFRead(t, readWithNilContext, plain, off, length)
 						}
 					}
 				})

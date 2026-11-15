@@ -174,7 +174,7 @@ func (d *Downloader) process(ctx context.Context, entry *storage.Entry, mountPat
 			return fmt.Errorf("claim usenet download path: %w", err)
 		}
 		for _, file := range entry.GetActiveFiles() {
-			if _, err := safeUsenetFilePath(d.dest, entry, file.Name); err != nil {
+			if _, err := usenetActionFilePath(d.dest, entry, file.Name); err != nil {
 				return err
 			}
 		}
@@ -290,7 +290,9 @@ func (d *Downloader) processSymlink(ctx context.Context, entry *storage.Entry, m
 	}
 
 	entry.IsDownloading = true
-	_ = d.manager.queue.Update(entry)
+	if err := d.manager.queue.Update(entry); err != nil {
+		return err
+	}
 
 	if err := d.waitForSymlinkFilesReady(ctx, filePaths, symlinkReadyTimeout); err != nil {
 		return err
@@ -398,17 +400,11 @@ func (d *Downloader) createSymlinksWhenMountFilesAppear(ctx context.Context, ent
 					}
 
 					if file, exists := remainingFiles[entryName]; exists {
-						fileSymlinkPath, pathErr := safeUsenetFilePath(d.dest, entry, file.Name)
-						if pathErr != nil {
+						if err := ctx.Err(); err != nil {
 							_ = directory.Close()
-							return pathErr
+							return err
 						}
-						storedTarget, targetErr := symlinkTarget(fileSymlinkPath, fullPath, d.relativeSymlinksEnabled())
-						if targetErr != nil {
-							_ = directory.Close()
-							return targetErr
-						}
-						linkErr := safepath.Symlink(d.dest, storedTarget, fileSymlinkPath)
+						fileSymlinkPath, linkErr := createOwnedUsenetSymlink(d.dest, entry, file.Name, fullPath, d.relativeSymlinksEnabled())
 						if linkErr != nil {
 							_ = directory.Close()
 							return fmt.Errorf(
@@ -1079,8 +1075,6 @@ func (d *Downloader) processUsenetDownload(ctx context.Context, entry *storage.E
 	err := p.Wait()
 
 	if err != nil {
-		entry.MarkAsError(err)
-		_ = d.manager.queue.Update(entry)
 		return fmt.Errorf("NZB download failed: %w", err)
 	}
 

@@ -238,6 +238,11 @@ func (m *Manager) rebuildQueuedNZBJob(ctx context.Context, entry *storage.Entry)
 	if m.usenet == nil {
 		return nil, fmt.Errorf("usenet is not configured")
 	}
+	// Reject stale/tampered placement before parsing can overwrite metadata or
+	// remove a staged source. Recovery retains the already claimed output path.
+	if _, err := safeUsenetEntryDownloadPath(m.config.DownloadFolder, entry); err != nil {
+		return nil, fmt.Errorf("unsafe queued NZB output: %w", err)
+	}
 	var (
 		content []byte
 		err     error
@@ -255,11 +260,7 @@ func (m *Manager) rebuildQueuedNZBJob(ctx context.Context, entry *storage.Entry)
 		return nil, fmt.Errorf("read queued NZB source: %w", err)
 	}
 
-	name := entry.OriginalFilename
-	if name == "" {
-		name = entry.Name
-	}
-	meta, groups, err := m.usenet.ParseWithID(ctx, entry.InfoHash, name, content, entry.Category)
+	meta, groups, err := m.usenet.ReparseWithID(ctx, entry.InfoHash, entry.Name, content, entry.Category)
 	if err != nil {
 		return nil, fmt.Errorf("usenet parse failed: %w", err)
 	}
@@ -273,8 +274,8 @@ func (m *Manager) rebuildQueuedNZBJob(ctx context.Context, entry *storage.Entry)
 	}
 
 	entry.Magnet = ""
-	entry.Name = meta.Name
-	entry.OriginalFilename = meta.Name
+	// Name, OriginalFilename and OutputName are persisted identities. Parsing
+	// the retained source must not rename its output directory or mount alias.
 	entry.Size = meta.TotalSize
 	entry.Bytes = meta.TotalSize
 	entry.Status = debridTypes.TorrentStatusDownloading

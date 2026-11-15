@@ -67,7 +67,7 @@ export async function validateBeta(env, read) {
     requireThat(env.GITHUB_EVENT_NAME === 'workflow_dispatch', 'Beta publishing requires a manual request');
     requireThat(env.GITHUB_REPOSITORY === repository && env.GITHUB_REPOSITORY_ID === String(repositoryId), 'Only the Tessarr repository may publish');
     requireThat(env.GITHUB_REF === 'refs/heads/beta', 'Select the beta branch');
-    requireThat(['validate', 'publish'].includes(env.BETA_MODE), 'Select validate or publish mode');
+    requireThat(['validate', 'build', 'publish'].includes(env.BETA_MODE), 'Select validate, build or publish mode');
     requireThat(env.BETA_MODE !== 'publish' || env.GITHUB_RUN_ATTEMPT === '1', 'Publishing reruns are refused; make a new explicit request');
     const sha = env.BETA_EXPECTED_SHA;
     requireThat(typeof sha === 'string' && /^[a-f0-9]{40}$/.test(sha) && sha === env.GITHUB_SHA, 'Supply the exact 40-character dispatch revision');

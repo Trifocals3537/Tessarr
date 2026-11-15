@@ -29,6 +29,12 @@ Open **Actions → Guarded Beta Publishing**, select `beta`, and enter its full
 revision. Start with the default `validate` mode. It checks approval evidence
 without building an image, logging in to the registry, or publishing anything.
 
+Use `build` to test the multi-platform OCI build and digest-preserving local
+transfer without publishing. This saves a one-day CI artifact and runs with
+read-only repository permissions. Only the separate `publish` job can obtain
+package-write permission; it downloads the verified archive by its exact
+artifact ID from the same run.
+
 Choose `publish` only when deliberately requesting an image. A push or merge
 does not publish. The gate requires the current beta revision, the real CI
 workflow, and every required job passing in its current attempt. PR merge

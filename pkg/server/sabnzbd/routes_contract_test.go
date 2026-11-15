@@ -175,16 +175,7 @@ func testRouterAcceptsQueueActionsFromForm(t *testing.T, router http.Handler) {
 		"ma_password": {"arr-token"},
 	}))
 
-	if response.Code != http.StatusOK {
-		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
-	}
-	var got StatusResponse
-	if err := json.Unmarshal(response.Body.Bytes(), &got); err != nil {
-		t.Fatal(err)
-	}
-	if !got.Status {
-		t.Fatalf("response = %#v", got)
-	}
+	requireSABControlError(t, response, http.StatusNotImplemented)
 }
 
 func testRouterAcceptsDeleteIdentifiersFromForm(

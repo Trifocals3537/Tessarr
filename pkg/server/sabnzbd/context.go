@@ -136,7 +136,9 @@ func isGETAction(r *http.Request) bool {
 	switch strings.TrimSpace(r.FormValue("mode")) {
 	case ModeQueue, ModeHistory:
 		return r.FormValue("name") != ""
-	case ModeConfig, ModeGetConfig, ModeVersion, ModeGetCats, ModeGetScripts, ModeGetFiles, ModeStatus, ModeFullStatus:
+	case ModeConfig, ModeGetConfig:
+		return strings.EqualFold(strings.TrimSpace(r.FormValue("name")), "set_pause")
+	case ModeVersion, ModeGetCats, ModeGetScripts, ModeGetFiles, ModeStatus, ModeFullStatus:
 		return false
 	default:
 		// Unknown and future action modes must not silently inherit the

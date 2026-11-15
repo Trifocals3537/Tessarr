@@ -91,7 +91,9 @@ func uncachedStallPolicy(
 			return "no_seeds", min(generic, noSeedsStallTimeout)
 		}
 		return "stalled", generic
-	case "paused", "pausedup", "pauseddl", "checkingresumedata", "checkingup", "checkingdl":
+	case "paused", "pausedup", "pauseddl", "checking", "checkingresumedata", "checkingup", "checkingdl":
+		// A provider verification phase is not evidence of a stuck transfer.
+		// Keep bare TorBox checking under the same policy as its variants.
 		return "", 0
 	default:
 		// Raw provider state is diagnostic data, not a complete cross-provider

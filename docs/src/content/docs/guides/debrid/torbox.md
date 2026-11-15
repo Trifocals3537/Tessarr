@@ -30,3 +30,14 @@ both the submitted file and its generated magnet without changing the infohash.
 All configuration options from [Real Debrid](./real-debrid/) apply (rate limits, workers, proxy, etc.).
 
 See [Configuration Reference](../configuration/#debrid-providers) for full options.
+
+## Checking Downloads
+
+TorBox can report `checking` while it verifies a torrent. Tessarr keeps an accepted
+uncached transfer in progress and continues updating its observed progress and
+metadata, as it does for `checkingResumeData`, `checkingUP`, and `checkingDL`.
+
+Checking alone does not trigger automatic removal or replacement, even after a
+long period without progress. A 100% progress value also requires TorBox's
+completion confirmation and usable file metadata before processing can finish.
+If a transfer remains in checking, inspect its status in the TorBox dashboard.

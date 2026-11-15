@@ -409,7 +409,7 @@ jobs:
           build-args: |
             VERSION=${{ needs.prepare.outputs.version }}
             CHANNEL=${{ needs.prepare.outputs.channel }}
-          tags: ${{ steps.metadata.outputs.tags }}
+          tags: ${{ needs.prepare.outputs.channel == 'stable' && steps.metadata.outputs.tags || format('{0}:{1}', env.GHCR_IMAGE, needs.prepare.outputs.version) }}
           labels: ${{ steps.metadata.outputs.labels }}
           cache-from: type=gha,scope=release
           cache-to: type=gha,scope=release,mode=max

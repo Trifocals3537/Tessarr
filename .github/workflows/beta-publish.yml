@@ -5,9 +5,9 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: Validate only, or explicitly publish the checked beta image
+        description: Validate, test-build without publishing, or explicitly publish
         type: choice
-        options: [validate, publish]
+        options: [validate, build, publish]
         default: validate
         required: true
       expected_sha:
@@ -55,20 +55,22 @@ jobs:
           BETA_CI_RUN_ID: ${{ inputs.ci_run_id }}
         run: node scripts/beta-publish-gate.mjs
 
-  publish:
-    name: Build and publish approved beta image
+  build:
+    name: Build and verify approved beta OCI image
     needs: validate
     if: >-
-      inputs.mode == 'publish' &&
+      inputs.mode != 'validate' &&
       github.repository_id == '1426317456' &&
       github.ref == 'refs/heads/beta'
     runs-on: ubuntu-24.04
     permissions:
       contents: read
       actions: read
-      packages: write
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      artifact_id: ${{ steps.archive.outputs.artifact-id }}
     env:
-      BETA_MODE: publish
+      BETA_MODE: ${{ inputs.mode }}
       BETA_EXPECTED_SHA: ${{ inputs.expected_sha }}
       BETA_CI_RUN_ID: ${{ inputs.ci_run_id }}
     steps:
@@ -122,14 +124,62 @@ jobs:
           build-args: |
             VERSION=${{ steps.version.outputs.version }}
             CHANNEL=beta
-          tags: ${{ steps.metadata.outputs.tags }}
+          # Export one named image. The shared channel tag is promoted later.
+          tags: ${{ env.GHCR_IMAGE }}:${{ steps.version.outputs.version }}
           labels: ${{ steps.metadata.outputs.labels }}
           cache-from: type=gha,scope=beta
           cache-to: type=gha,scope=beta,mode=max
           provenance: mode=max
           sbom: true
+      - name: Verify OCI transfer without registry writes
+        run: >-
+          skopeo copy --all --preserve-digests
+          "oci-archive:$RUNNER_TEMP/beta-image.tar"
+          "oci:$RUNNER_TEMP/beta-transfer-check:verified"
+      - name: Save verified OCI archive
+        id: archive
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: approved-beta-oci-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/beta-image.tar
+          compression-level: 0
+          if-no-files-found: error
+          retention-days: 1
+
+  publish:
+    name: Publish approved beta OCI image
+    needs: [validate, build]
+    if: >-
+      inputs.mode == 'publish' &&
+      github.repository_id == '1426317456' &&
+      github.ref == 'refs/heads/beta'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      actions: read
+      packages: write
+    env:
+      BETA_MODE: publish
+      BETA_EXPECTED_SHA: ${{ inputs.expected_sha }}
+      BETA_CI_RUN_ID: ${{ inputs.ci_run_id }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ needs.validate.outputs.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: "22"
+      - name: Install OCI image transfer tool
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends skopeo
+      - name: Download this run's verified archive
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          artifact-ids: ${{ needs.build.outputs.artifact_id }}
+          path: ${{ runner.temp }}/approved-beta
+          merge-multiple: true
       - name: Revalidate and publish OCI archive
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          BETA_VERSION: ${{ steps.version.outputs.version }}
-        run: bash scripts/publish-beta-image.sh "$RUNNER_TEMP/beta-image.tar" "$BETA_VERSION" beta
+          BETA_VERSION: ${{ needs.build.outputs.version }}
+        run: bash scripts/publish-beta-image.sh "$RUNNER_TEMP/approved-beta/beta-image.tar" "$BETA_VERSION" beta

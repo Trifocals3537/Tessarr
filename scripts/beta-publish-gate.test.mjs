@@ -37,7 +37,7 @@ function fixture() {
     return state;
 }
 
-for (const mode of ['validate', 'publish']) {
+for (const mode of ['validate', 'build', 'publish']) {
     test(`accepts exact current beta with successful complete CI in ${mode} mode`, async () => {
         const state = fixture(); state.env.BETA_MODE = mode;
         assert.deepEqual(await validateBeta(state.env, state.read), {sha, runId: 42, attempt: 1});

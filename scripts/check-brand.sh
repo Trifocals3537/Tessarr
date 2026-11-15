@@ -82,7 +82,7 @@ while IFS= read -r path; do
     fi
 done < <(git ls-files | grep -i 'decypharr' || true)
 
-for workflow in .github/workflows/beta-docker.yml .github/workflows/release.yml; do
+for workflow in .github/workflows/beta-publish.yml .github/workflows/release.yml; do
     for expected in \
         'org.opencontainers.image.title=Tessarr' \
         'org.opencontainers.image.description=Self-hosted debrid and Usenet media bridge with qBittorrent and SABnzbd-compatible APIs' \

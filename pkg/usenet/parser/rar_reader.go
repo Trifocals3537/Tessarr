@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"hash/crc32"
 	"io"
+	"math"
 
 	"github.com/Trifocals3537/tessarr/internal/crypto"
 	"github.com/Trifocals3537/tessarr/internal/nntp"
@@ -347,129 +348,62 @@ func (p *RARParser) parseRAR5Stream(stream *rarReader, volumeIndex int, volumeNa
 	return result, nil
 }
 
-// readAndDecryptRAR5Header reads an encrypted RAR5 header from stream
-func (p *RARParser) readAndDecryptRAR5Header(stream *rarReader, key, iv []byte) (*rar5HeaderData, int, int64, error) {
-	// For encrypted headers, we need to read enough data and decrypt
-	// The header starts with encrypted CRC+size+type+flags...
-	// We read in blocks and decrypt
+const (
+	maxRAR5HeaderSize     = 65536
+	maxRAR5HeaderSizeVint = 3
+)
 
-	// Read first block to get header size
+// readAndDecryptRAR5Header reads an encrypted RAR5 header from stream.
+func (p *RARParser) readAndDecryptRAR5Header(stream *rarReader, key, iv []byte) (*rar5HeaderData, int, int64, error) {
+	mode, err := crypto.NewDecrypter(key, iv)
+	if err != nil {
+		return nil, 0, 0, err
+	}
+	// The first AES block contains the CRC and complete size vint. Keep one
+	// CBC mode for the whole header so its ciphertext chaining is preserved.
 	firstBlock := make([]byte, crypto.BlockSize)
 	if _, err := io.ReadFull(stream, firstBlock); err != nil {
 		return nil, 0, 0, err
 	}
-
-	// Save ciphertext for IV chaining
-	firstBlockCipher := make([]byte, len(firstBlock))
-	copy(firstBlockCipher, firstBlock)
-
-	// Decrypt first block
-	if err := crypto.DecryptBlock(firstBlock, key, iv); err != nil {
-		return nil, 0, 0, err
-	}
-
-	// Now parse the decrypted data as a normal header
-	// Skip CRC (4 bytes), read size
-	if len(firstBlock) < 5 {
-		return nil, 0, 0, fmt.Errorf("decrypted block too small")
-	}
-
-	// Read header size from decrypted data
-	r := bytes.NewReader(firstBlock[4:])
-	headerSize, err := readVInt(r)
+	mode.CryptBlocks(firstBlock, firstBlock)
+	headerSize, sizeVintBytes, _, err := readVIntFromReaderWithBytes(bytes.NewReader(firstBlock[4:]))
 	if err != nil {
 		return nil, 0, 0, err
 	}
-
-	// Calculate how many more blocks we need
-	// Sanity check: limit header size to 64KB to prevent OOM from corrupt decrypted data
-	if headerSize > 65536 {
+	if sizeVintBytes > maxRAR5HeaderSizeVint {
+		return nil, 0, 0, fmt.Errorf("invalid RAR5 header size vint")
+	}
+	// This size is still untrusted until the complete header CRC is checked.
+	// Retain the existing 64 KiB allocation limit before reading more data.
+	if headerSize > maxRAR5HeaderSize {
 		return nil, 0, 0, fmt.Errorf("encrypted header size too large: %d", headerSize)
 	}
-
-	totalEncryptedSize := int(headerSize) + 4 // header + CRC
+	plainSize := 4 + sizeVintBytes + int(headerSize)
+	totalEncryptedSize := plainSize
 	totalEncryptedSize = ((totalEncryptedSize + crypto.BlockSize - 1) / crypto.BlockSize) * crypto.BlockSize
-
 	if totalEncryptedSize > crypto.BlockSize {
-		// Read remaining blocks
 		remaining := make([]byte, totalEncryptedSize-crypto.BlockSize)
 		if _, err := io.ReadFull(stream, remaining); err != nil {
 			return nil, 0, 0, err
 		}
-
-		// Create new IV for CBC continuation (last ciphertext block)
-		newIV := firstBlockCipher[len(firstBlockCipher)-crypto.BlockSize:]
-		if err := crypto.DecryptBlock(remaining, key, newIV); err != nil {
-			return nil, 0, 0, err
-		}
-
+		mode.CryptBlocks(remaining, remaining)
 		firstBlock = append(firstBlock, remaining...)
 	}
-
-	// Parse the decrypted header data
-	r = bytes.NewReader(firstBlock[4:]) // Skip CRC
-
-	// Read header size again
-	headerSize, vintBytes, _, err := readVIntFromReaderWithBytes(r)
+	// Parse exactly CRC + encoded size + body through the plaintext path.
+	// Padding is neither CRC-covered nor available as missing header fields.
+	header, _, dataSize, err := p.readRAR5HeaderFromStream(bytes.NewReader(firstBlock[:plainSize]))
 	if err != nil {
 		return nil, 0, 0, err
 	}
-
-	headerType, n, err := readVIntFromReader(r)
-	if err != nil {
-		return nil, 0, 0, err
-	}
-
-	headerFlags, n2, err := readVIntFromReader(r)
-	if err != nil {
-		return nil, 0, 0, err
-	}
-
-	bytesConsumed := vintBytes + n + n2
-
-	// Read extra area size if present
-	if headerFlags&RAR5HeaderFlagExtraArea != 0 {
-		_, n, err = readVIntFromReader(r)
-		if err != nil {
-			return nil, 0, 0, err
-		}
-		bytesConsumed += n
-	}
-
-	// Read data area size if present
-	var dataAreaSize int64
-	if headerFlags&RAR5HeaderFlagDataArea != 0 {
-		dataSize, n, err := readVIntFromReader(r)
-		if err != nil {
-			return nil, 0, 0, err
-		}
-		bytesConsumed += n
-		dataAreaSize = int64(dataSize)
-	}
-
-	// Read remaining header data
-	remainingSize := int(headerSize) - bytesConsumed
-	var headerData []byte
-	if remainingSize > 0 {
-		headerData = make([]byte, remainingSize)
-		if _, err := io.ReadFull(r, headerData); err != nil {
-			return nil, 0, 0, err
-		}
-	}
-
-	return &rar5HeaderData{
-		Type:  headerType,
-		Flags: headerFlags,
-		Data:  headerData,
-	}, totalEncryptedSize, dataAreaSize, nil
+	return header, totalEncryptedSize, dataSize, nil
 }
 
 // readRAR5HeaderFromStream reads a RAR5 header from the stream
 // Optimized: reads header content in one call after getting header size
-func (p *RARParser) readRAR5HeaderFromStream(stream *rarReader) (*rar5HeaderData, int, int64, error) {
+func (p *RARParser) readRAR5HeaderFromStream(stream io.Reader) (*rar5HeaderData, int, int64, error) {
 	// Read header CRC (4 bytes) + first few bytes that contain the header size vint
 	// We read a small initial buffer to get the CRC and header size
-	initialBuf := make([]byte, 16)                // 4 bytes CRC + up to 10 bytes vint + some extra
+	initialBuf := make([]byte, 4+maxRAR5HeaderSizeVint)
 	n, err := io.ReadFull(stream, initialBuf[:5]) // Read CRC + at least 1 byte of size
 	if err != nil {
 		return nil, 0, 0, err
@@ -482,7 +416,7 @@ func (p *RARParser) readRAR5HeaderFromStream(stream *rarReader) (*rar5HeaderData
 	headerSize, vintBytes := parseVIntFromBuffer(initialBuf[pos:n])
 	if vintBytes == 0 {
 		// Need more bytes for the vint - rare case for large headers
-		for vintBytes == 0 && n < len(initialBuf) {
+		for vintBytes == 0 && n < 4+maxRAR5HeaderSizeVint {
 			extra, err := stream.Read(initialBuf[n : n+1])
 			if err != nil {
 				return nil, 0, 0, err
@@ -499,7 +433,7 @@ func (p *RARParser) readRAR5HeaderFromStream(stream *rarReader) (*rar5HeaderData
 	pos += vintBytes
 
 	// Sanity check
-	if headerSize > 65536 {
+	if headerSize > maxRAR5HeaderSize {
 		return nil, 0, 0, fmt.Errorf("invalid RAR5 header size: %d (too large)", headerSize)
 	}
 
@@ -546,8 +480,9 @@ func (p *RARParser) readRAR5HeaderFromStream(stream *rarReader) (*rar5HeaderData
 	bytesConsumed = int(reader.Size()) - reader.Len()
 
 	// Read extra area size if present
+	var extraAreaSize uint64
 	if headerFlags&RAR5HeaderFlagExtraArea != 0 {
-		_, err = readVInt(reader)
+		extraAreaSize, err = readVInt(reader)
 		if err != nil {
 			return nil, 0, 0, err
 		}
@@ -561,12 +496,18 @@ func (p *RARParser) readRAR5HeaderFromStream(stream *rarReader) (*rar5HeaderData
 		if err != nil {
 			return nil, 0, 0, err
 		}
+		if dataSize > math.MaxInt64 {
+			return nil, 0, 0, fmt.Errorf("RAR5 data area size too large: %d", dataSize)
+		}
 		bytesConsumed = int(reader.Size()) - reader.Len()
 		dataAreaSize = int64(dataSize)
 	}
 
 	// Remaining bytes are the header data
 	remainingHeaderSize := int(headerSize) - bytesConsumed
+	if extraAreaSize > uint64(remainingHeaderSize) {
+		return nil, 0, 0, fmt.Errorf("RAR5 extra area exceeds header body")
+	}
 	var headerData []byte
 	if remainingHeaderSize > 0 {
 		headerData = make([]byte, remainingHeaderSize)
@@ -628,6 +569,9 @@ func readVIntFromReaderWithBytes(r io.Reader) (uint64, int, []byte, error) {
 
 		b := buf[bytesRead]
 		bytesRead++
+		if shift == 63 && b > 1 {
+			return 0, bytesRead, buf[:bytesRead], fmt.Errorf("vint too large")
+		}
 
 		result |= uint64(b&0x7F) << shift
 

@@ -1,8 +1,5 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import {mkdtempSync, readFileSync, rmSync} from 'node:fs';
-import {tmpdir} from 'node:os';
-import {join} from 'node:path';
 import {githubReader, main, requiredJobs, validateBeta} from './beta-publish-gate.mjs';
 
 const sha = 'a'.repeat(40);
@@ -153,15 +150,10 @@ test('API reader fails closed and never follows a token-bearing redirect', async
     await assert.rejects(githubReader('synthetic', async () => { throw new Error('network unavailable'); })('branches/beta'));
 });
 
-test('writes outputs only after successful validation', async t => {
-    const directory = mkdtempSync(join(tmpdir(), 'tessarr-beta-gate-'));
-    t.after(() => rmSync(directory, {recursive: true, force: true}));
-    const state = fixture(); state.env.GITHUB_OUTPUT = join(directory, 'output');
-    state.env.GITHUB_STEP_SUMMARY = join(directory, 'summary');
+test('returns validated evidence only after successful validation', async () => {
+    const state = fixture();
     state.env.BETA_EXPECTED_SHA = 'invalid';
     await assert.rejects(main(state.env, state.read));
-    assert.throws(() => readFileSync(state.env.GITHUB_OUTPUT), {code: 'ENOENT'});
     state.env.BETA_EXPECTED_SHA = sha;
-    await main(state.env, state.read);
-    assert.equal(readFileSync(state.env.GITHUB_OUTPUT, 'utf8'), `sha=${sha}\nci_run_id=42\nci_attempt=1\n`);
+    assert.deepEqual(await main(state.env, state.read), {sha, runId: 42, attempt: 1});
 });

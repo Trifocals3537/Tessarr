@@ -1,4 +1,3 @@
-import {appendFileSync} from 'node:fs';
 import {pathToFileURL} from 'node:url';
 
 const repository = 'Trifocals3537/tessarr';
@@ -99,10 +98,8 @@ export async function validateBeta(env, read) {
 
 export async function main(env = process.env, read = githubReader(env.GH_TOKEN)) {
     const result = await validateBeta(env, read);
-    if (env.GITHUB_OUTPUT) appendFileSync(env.GITHUB_OUTPUT, `sha=${result.sha}\nci_run_id=${result.runId}\nci_attempt=${result.attempt}\n`);
     const message = `Validated beta ${result.sha} against CI ${result.runId}, attempt ${result.attempt}. Mode: ${env.BETA_MODE}.`;
     console.log(message);
-    if (env.GITHUB_STEP_SUMMARY) appendFileSync(env.GITHUB_STEP_SUMMARY, `${message}\n`);
     return result;
 }
 

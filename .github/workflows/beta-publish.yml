@@ -102,7 +102,6 @@ jobs:
         with:
           images: ${{ env.GHCR_IMAGE }}
           tags: |
-            type=raw,value=beta
             type=raw,value=${{ steps.version.outputs.version }}
           labels: |
             org.opencontainers.image.title=Tessarr

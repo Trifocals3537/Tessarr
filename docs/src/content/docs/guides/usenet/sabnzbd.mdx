@@ -53,6 +53,23 @@ Tessarr implements these Sabnzbd API endpoints:
 | `/sabnzbd/api?mode=config` | Get configuration |
 | `/sabnzbd/api?mode=delete` | Remove from queue |
 
+## Pause and Priority Limitations
+
+Tessarr does not support SABnzbd pause/resume or queue priority changes. Global
+`mode=pause` / `mode=resume`, queue `name=pause` / `name=resume` / `name=priority`,
+and timed `mode=config&name=set_pause` requests return HTTP 501 with
+`status: false` and an explanatory error. These requests leave the queue unchanged.
+
+For `addfile` and `addurl`, [SABnzbd's paused priority](https://sabnzbd.org/wiki/configuration/4.5/api)
+(`priority=-2`) and the stopped value (`-4`) are rejected with the same error status
+before any NZBs are fetched or admitted. Malformed and unknown priorities return
+HTTP 400. Omitted or blank priority, category default (`-100`), Low (`-1`), Normal
+(`0`), High (`1`), and Force (`2`) retain normal scheduling in Tessarr.
+
+Configure Arr clients to submit active downloads. If a release needs review or
+remapping first, keep it in Arr until it is ready to process; Tessarr cannot hold
+an accepted download for that review.
+
 ## Categories
 
 Categories organize downloads:

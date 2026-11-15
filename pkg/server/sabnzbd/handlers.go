@@ -22,9 +22,19 @@ func (s *SABnzbd) handleAPI(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	mode := getMode(ctx)
 
+	// categoryContext has bounded and parsed every form field, and authContext
+	// has authenticated the request. Reject a requested hold before either add
+	// handler can fetch metadata, stage sources, or admit any part of a batch.
+	if r.Method == http.MethodPost && (mode == ModeAddURL || mode == ModeAddFile) &&
+		!s.validateAddPriority(w, r) {
+		return
+	}
+
 	switch mode {
 	case ModeQueue:
 		s.handleQueue(w, r)
+	case ModePause, ModeResume:
+		s.writeUnsupportedControl(w)
 	case ModeHistory:
 		s.handleHistory(w, r)
 	case ModeConfig:
@@ -62,17 +72,11 @@ func (s *SABnzbd) handleQueue(w http.ResponseWriter, r *http.Request) {
 	switch name {
 	case "delete":
 		s.handleDelete(w, r)
-	case "pause":
-		s.handleQueuePause(w, r)
-	case "resume":
-		s.handleQueueResume(w, r)
+	case "pause", "resume", "priority":
+		s.writeUnsupportedControl(w)
+	default:
+		s.writeError(w, "SAB queue action is not supported by Tessarr", http.StatusNotImplemented)
 	}
-}
-
-// handleResume handles resume operations
-func (s *SABnzbd) handleQueueResume(w http.ResponseWriter, r *http.Request) {
-	response := StatusResponse{Status: true}
-	utils.JSONResponse(w, response, http.StatusOK)
 }
 
 // handleDelete handles delete operations
@@ -137,12 +141,6 @@ func (s *SABnzbd) handleDelete(w http.ResponseWriter, r *http.Request) {
 		Status: true,
 		Error:  strings.Join(errors, "; "),
 	}
-	utils.JSONResponse(w, response, http.StatusOK)
-}
-
-// handlePause handles pause operations
-func (s *SABnzbd) handleQueuePause(w http.ResponseWriter, r *http.Request) {
-	response := StatusResponse{Status: true}
 	utils.JSONResponse(w, response, http.StatusOK)
 }
 
@@ -263,6 +261,10 @@ func (s *SABnzbd) handleHistoryList(w http.ResponseWriter, r *http.Request) {
 
 // handleConfig returns the configuration
 func (s *SABnzbd) handleConfig(w http.ResponseWriter, r *http.Request) {
+	if strings.EqualFold(strings.TrimSpace(r.FormValue("name")), "set_pause") {
+		s.writeUnsupportedControl(w)
+		return
+	}
 
 	response := ConfigResponse{
 		Config: s.config,

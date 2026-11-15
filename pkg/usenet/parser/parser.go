@@ -667,6 +667,9 @@ func (p *NZBParser) processFileGroups(ctx context.Context, groups map[string]*Fi
 		}
 		fileGroups = append(fileGroups, *g)
 	}
+	// Stable group numbers let bounded diagnostics refer to existing warnings
+	// without copying private release/member names into the new message.
+	sort.Slice(fileGroups, func(i, j int) bool { return fileGroups[i].BaseName < fileGroups[j].BaseName })
 
 	// Use a Mapper with limited concurrency to prevent goroutine explosion
 	// when nested with RAR/archive parsers that also use parallel processing
@@ -681,7 +684,6 @@ func (p *NZBParser) processFileGroups(ctx context.Context, groups map[string]*Fi
 	results := mapper.Map(fileGroups, func(g *FileGroup) groupResult {
 		files, err := p.processFileGroup(ctx, g, password)
 		if err != nil {
-			p.logger.Warn().Err(err).Str("group", g.BaseName).Msg("Failed to process file group")
 			return groupResult{err: err}
 		}
 		return groupResult{files: files}
@@ -690,9 +692,15 @@ func (p *NZBParser) processFileGroups(ctx context.Context, groups map[string]*Fi
 	// Filter nils
 	var files []storage.NZBFile
 	var failures []error
-	for _, result := range results {
+	var rarFailures []rarGroupFailure
+	for index, result := range results {
 		if result.err != nil {
+			group := &fileGroups[index]
+			p.logger.Warn().Err(result.err).Str("group", group.BaseName).Int("group_index", index+1).Msg("Failed to process file group")
 			failures = append(failures, result.err)
+			if group.Type == storage.NZBFileTypeRar && len(rarFailures) < maxRARDiagnosticGroups {
+				rarFailures = append(rarFailures, rarGroupFailure{index: index + 1, group: group, err: result.err})
+			}
 		}
 		for _, f := range result.files {
 			if f != nil {
@@ -710,6 +718,10 @@ func (p *NZBParser) processFileGroups(ctx context.Context, groups map[string]*Fi
 				}
 			}
 		}
+	}
+	for _, hint := range rarGroupDiagnostics(rarFailures) {
+		p.logger.Warn().Msg(hint.Error())
+		failures = append(failures, hint)
 	}
 
 	// Count deferred archives

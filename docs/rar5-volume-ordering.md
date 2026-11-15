@@ -34,7 +34,9 @@ availability checks still apply. Ordering does not prove that every later articl
 is available or validate a complete media payload during admission. Streaming
 continues to validate fetched article bodies. This change does not merge separate
 file groups, infer archive identity across basenames, migrate stored NZB metadata,
-or resolve the cross-group naming case in issue #24.
+or reconcile the cross-group naming case in issue #24. The separate
+[filename-group diagnostic](rar-group-diagnostics.md) can now explain some
+complementary failures without combining those groups.
 
 Synthetic tests reproduce the 13-volume filename/header permutation from #20
 with plain and encrypted headers. They cover complete NZB admission, fragmented

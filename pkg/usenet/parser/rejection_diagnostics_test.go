@@ -3,6 +3,7 @@ package parser
 import (
 	"context"
 	"errors"
+	"net"
 	"testing"
 
 	"github.com/Trifocals3537/tessarr/internal/nntp"
@@ -17,6 +18,7 @@ func TestProbeRejectionEvidencePreservesKindsAndDecision(t *testing.T) {
 		{"access", []error{&nntp.Error{Type: nntp.ErrorTypeAuthentication}}, RejectionAccessDenied},
 		{"timeout", []error{nntp.NewTimeoutError(errors.New("private timeout detail"))}, RejectionTimeout},
 		{"wrapped timeout", []error{nntp.NewConnectionError(context.DeadlineExceeded)}, RejectionTimeout},
+		{"DNS timeout without unwrap cause", []error{nntp.NewConnectionError(&net.DNSError{IsTimeout: true, Name: "private.invalid"})}, RejectionTimeout},
 		{"connection", []error{nntp.NewConnectionError(errors.New("private host"))}, RejectionProviderUnavailable},
 		{"mixed", []error{&nntp.Error{Type: nntp.ErrorTypeArticleNotFound}, nntp.NewTimeoutError(nil)}, RejectionMixed},
 	} {

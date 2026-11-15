@@ -38,6 +38,7 @@ func TestNZBRejectionClassificationUsesTypedEvidence(t *testing.T) {
 		{"deadline", fmt.Errorf("wrapped: %w", context.DeadlineExceeded), nzbTimeout},
 		{"connection", nntp.NewConnectionError(errors.New("private host")), nzbProviderUnavailable},
 		{"connection-wrapped socket timeout", nntp.NewConnectionError(&net.OpError{Op: "read", Net: "tcp", Err: os.ErrDeadlineExceeded}), nzbTimeout},
+		{"connection-wrapped DNS timeout", nntp.NewConnectionError(&net.DNSError{IsTimeout: true, Err: "private resolver timeout", Name: "private.invalid"}), nzbTimeout},
 		{"busy", &nntp.Error{Type: nntp.ErrorTypeServerBusy}, nzbProviderUnavailable},
 		{"pool unavailable", &nntp.Error{Type: nntp.ErrorTypeNoAvailableConnection}, nzbProviderUnavailable},
 		{"cancelled", fmt.Errorf("wrapped: %w", context.Canceled), nzbCancelled},

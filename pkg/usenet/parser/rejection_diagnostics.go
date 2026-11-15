@@ -91,11 +91,11 @@ func rejectionMask(err error) uint16 {
 			}
 			return kinds
 		}
-		if wrapped, ok := current.(interface{ Unwrap() error }); ok {
-			return visit(wrapped.Unwrap())
-		}
 		if timeout, ok := current.(net.Error); ok && timeout.Timeout() {
 			return rejectionBit(RejectionTimeout)
+		}
+		if wrapped, ok := current.(interface{ Unwrap() error }); ok {
+			return visit(wrapped.Unwrap())
 		}
 		return rejectionBit(RejectionOther)
 	}

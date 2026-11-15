@@ -1,10 +1,67 @@
-# Go dependency advisory follow-up (2026-10-19)
+# Go dependency advisory follow-up
+
+## November 14 security follow-up
+
+[Issue #28](https://github.com/Trifocals3537/tessarr/issues/28) records four
+reachable findings that stopped CI before its race and native-build steps. The
+minimum Go version is now **1.26.11**, retaining the 1.26 series. The dependency
+updates also remove two imported-package findings and the unused legacy
+OpenPGP module finding reported by the current database.
+
+| Component | Previous | Selected | Advisory |
+| --- | --- | --- | --- |
+| Go | `1.26.10` | `1.26.11` | [GO-2026-6859](https://pkg.go.dev/vuln/GO-2026-6859) |
+| `github.com/anacrolix/torrent` | `v1.55.0` | `v1.62.0` | [GO-2026-6894](https://pkg.go.dev/vuln/GO-2026-6894) |
+| `github.com/andybalholm/brotli` | `v1.2.0` | `v1.2.7` | [GO-2026-6888](https://pkg.go.dev/vuln/GO-2026-6888) |
+| `github.com/klauspost/compress` | `v1.18.7` | `v1.20.2` | [GO-2026-6865](https://pkg.go.dev/vuln/GO-2026-6865) |
+| `golang.org/x/net` | `v0.60.0` | `v0.62.0` | [GO-2026-6866](https://pkg.go.dev/vuln/GO-2026-6866), [GO-2026-6860](https://pkg.go.dev/vuln/GO-2026-6860) |
+| `golang.org/x/crypto` | `v0.57.0` | `v0.59.0` | [GO-2026-5932](https://pkg.go.dev/vuln/GO-2026-5932) |
+
+The stable torrent release contains upstream fix
+[`76452a2`](https://github.com/anacrolix/torrent/commit/76452a2c8a2fd9c59d4d4f10fc3495723d538c7b).
+There is no `v1.61.1` tag; `v1.62.0` is the first available stable tag after the
+fixed pseudo-version in the advisory. Its module requires Go 1.26.0, which the
+selected toolchain satisfies. The newer `x/crypto` root module removes the
+legacy OpenPGP packages; their separate deprecated module remains unsafe and
+must not be introduced into the application's import graph.
+
+`go mod tidy` records the required companion updates, including `x/sys`,
+`x/term`, `x/text`, `x/sync`, protobuf, and the torrent metadata dependencies.
+No scanner suppression, module replacement, or CI gate change is included.
+
+The Windows/amd64 source scan with CGO disabled, Go 1.26.11, and the pinned
+govulncheck 1.7.0 reports **no vulnerabilities** against the current database.
+The CI native Linux job repeats the scan with CGO enabled before the full race
+suite, native build, and command-line checks. GitHub records the results for
+each published revision.
+
+Regression coverage rejects deeply nested torrent extension fields in both the
+outer document and raw info dictionary, while accepting ordinary extensions.
+All four excessive-nesting cases reproduced on the previous dependency.
+Frozen NZB frames produced with `compress v1.18.7` verify full metadata,
+header-only, and sampled message-ID reads after the upgrade, with and without
+article geometry. The deprecated torrent magnet constructor is replaced with
+the equivalent v1 magnet fields from already validated metadata. Regression
+tests retain the infohash, UTF-8 display name, tracker policy, and web seeds.
+
+Reproduce the current checks from the repository root:
+
+```sh
+go version
+govulncheck -show=verbose ./...
+go test -count=1 ./...
+go vet ./...
+go mod verify
+```
+
+Use Linux/amd64 with CGO enabled for the CI race and native compatibility checks.
+The dated sections below retain historical results and toolchain pins.
 
 ## October 21 toolchain follow-up
 
 The durable-workflow branch's unchanged vulnerability gate found the newly
 published [GO-2026-6809](https://pkg.go.dev/vuln/GO-2026-6809) in `crypto/x509`,
-reachable through the NNTP TLS handshake. The minimum Go version is now
+reachable through the NNTP TLS handshake. The minimum Go version was raised to
 **1.26.10**, the patched release in the retained 1.26 series. The October 19
 results and explicit toolchain commands below are historical evidence; current
 validation must use the updated `go.mod` pin and the current advisory database.
@@ -59,13 +116,14 @@ Some HTTP/2 records also cover the Go standard library. The retained Go 1.26.9
 toolchain already contains the applicable standard-library fixes; the updates
 above address the separately versioned `x/net` module.
 
-## Remaining unused-code finding
+## October 19 unused-code finding (historical)
 
 [GO-2026-5932](https://pkg.go.dev/vuln/GO-2026-5932) covers
 `golang.org/x/crypto/openpgp` and its subpackages. Upstream marks this OpenPGP
-implementation unmaintained and unsafe by design; **all versions are affected,
-with no known fixed version**. Updating `x/crypto` therefore cannot remove this
-module-level finding.
+implementation unmaintained and unsafe by design. At that time, the advisory
+covered all versions with no known fix. The November follow-up above records
+the later removal of those packages from the `x/crypto` root module; the
+deprecated separate OpenPGP module remains unsafe.
 
 The application retains `x/crypto` for bcrypt authentication. Neither production
 code nor test dependencies import `openpgp` or any of its subpackages in the

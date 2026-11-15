@@ -190,7 +190,14 @@ func GetMagnetFromBytes(torrentData []byte, rmTrackerUrls bool) (*Magnet, error)
 			log.Printf("Removed %d tracker tiers from torrent file", originalTrackerCount)
 		}
 	}
-	magnetMeta := mi.Magnet(&hash, &info)
+	// Retain the existing v1 magnet contract using the metadata already
+	// validated above. The newer constructor also advertises v2 infohashes.
+	magnetMeta := metainfo.Magnet{
+		InfoHash:    hash,
+		DisplayName: info.BestName(),
+		Trackers:    mi.UpvertedAnnounceList().DistinctValues(),
+		Params:      url.Values{"ws": mi.UrlList},
+	}
 	magnet := &Magnet{
 		InfoHash: infoHash,
 		Name:     info.Name,

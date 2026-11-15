@@ -303,10 +303,11 @@ func (p *RARParser) parseRAR5Stream(stream *rarReader, volumeIndex int, volumeNa
 
 				// Skip data section
 				if encDataSize > 0 {
-					// Data is also encrypted, need to account for padding
-					paddedSize := ((encDataSize + crypto.BlockSize - 1) / crypto.BlockSize) * crypto.BlockSize
-					if err := stream.Skip(paddedSize); err != nil {
-						return nil, fmt.Errorf("failed to skip encrypted RAR5 data: %w", err)
+					// The declared packed size is the physical data area, including
+					// padding when file data is encrypted. Header encryption alone
+					// must not round plain file or service data into the next IV.
+					if err := stream.Skip(encDataSize); err != nil {
+						return nil, fmt.Errorf("failed to skip RAR5 data: %w", err)
 					}
 				}
 

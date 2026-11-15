@@ -24,10 +24,36 @@ historical files.
 
 ## Beta container builds
 
-Merges to `beta` publish the shared `beta` container tag automatically. A
-manual rerun must select the `beta` branch; the workflow rejects every other
-ref. Each build also receives an immutable version tag in the form
-`2.6.0-beta.RUN.SHA`.
+Open **Actions → Guarded Beta Publishing**, select `beta`, and enter its full
+40-character commit SHA and the latest successful **CI** run ID for that exact
+revision. Start with the default `validate` mode. It checks approval evidence
+without building an image, logging in to the registry, or publishing anything.
+
+Use `build` to test the multi-platform OCI build and digest-preserving local
+transfer without publishing. This saves a one-day CI artifact and runs with
+read-only repository permissions. Only the separate `publish` job can obtain
+package-write permission; it downloads the verified archive by its exact
+artifact ID from the same run.
+
+Choose `publish` only when deliberately requesting an image. A push or merge
+does not publish. The gate requires the current beta revision, the real CI
+workflow, and every required job passing in its current attempt. PR merge
+checks, older CI runs, skipped jobs, failed/incomplete runs, forks and other
+branches cannot authorize publication. Publishing reruns are refused; retry
+with a new explicit dispatch after fixing the cause.
+
+Each image is built from the validated SHA into an OCI archive before registry
+login. The gate runs again before upload and before promoting the shared
+channel tag, preserving multi-platform manifests, provenance and SBOMs. If beta
+or its CI moves during an upload, promotion stops; a version tag may already
+exist. Continuous beta versions use `2.6.0-beta.RUN_ID.SHA`, where `RUN_ID` is
+globally unique and `SHA` is the seven-character source prefix. The existing
+version badge continues linking to that source commit.
+
+The old **Beta Docker Build** workflow (`beta-docker.yml`) is retired and must
+remain disabled in GitHub. Keeping its workflow identity disabled also prevents
+delayed events from historical push-triggered definitions from publishing.
+The new workflow exists on both protected `main` and `beta` branches.
 
 ## Versioned releases
 
@@ -41,6 +67,11 @@ Enter the complete tag in the workflow input. The workflow rejects malformed
 or existing tags and verifies the selected branch. Every job builds the
 immutable commit associated with that dispatch. Runs from the same branch are
 serialized so shared channel tags cannot race each other.
+
+Beta/RC releases also require `expected_sha` and `ci_run_id` and use the same
+gate and final publication checks as continuous beta images. Both paths share
+the `beta-publishing` concurrency group. Stable releases retain their existing
+manual process and do not require these beta-only inputs.
 
 The workflow builds and validates all platform artifacts, publishes the
 container image, then creates the GitHub release and its tag. A failed run does

@@ -16,7 +16,9 @@ and optional password-check bytes must be present before derivation. A short
 record cannot borrow fields from the following record, duplicate encryption
 records are rejected, and unknown records are skipped by their exact lengths.
 When a file password check is present and a password is supplied, it is verified
-before returning usable encryption metadata.
+before returning usable encryption metadata. The entire extra area is checked
+before deriving a key, so a duplicate or malformed later record cannot cause
+expensive password work for a header that will be rejected.
 
 ## Validation
 

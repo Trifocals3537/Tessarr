@@ -147,6 +147,19 @@ func TestRAR5FileEncryptionRejectsBeforeDerivation(t *testing.T) {
 				}
 			}
 		}
+		// A complete maximum-work record must also wait for validation of
+		// every following record, including duplicates and invalid lengths.
+		complete := rar5FileWithExtraRecordFixture(record)
+		duplicate := binary.AppendUvarint(nil, uint64(len(record)))
+		duplicate = append(duplicate, record...)
+		for repeat := 0; repeat < 32; repeat++ {
+			for _, suffix := range [][]byte{duplicate, {0}, {0x80}, {2, 0x7f}, {1, 0x80}} {
+				data := append(append([]byte(nil), complete...), suffix...)
+				if p.parseRAR5FileHeader(data, 0, "fixture.rar", 0, 0, rar5HeaderFixturePassword) != nil {
+					t.Error("invalid trailing record accepted")
+				}
+			}
+		}
 		return
 	}
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)

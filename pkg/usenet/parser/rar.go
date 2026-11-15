@@ -693,6 +693,8 @@ func (p *RARParser) parseRAR5FileHeader(data []byte, volumeIndex int, volumeName
 	var isEncrypted bool
 	var encryptionIV []byte
 	var encryptionKey []byte
+	var encryptionSalt, encryptionCheck []byte
+	var encryptionKDF int
 
 	for r.Len() > 0 {
 		recordSize, err := readVInt(r)
@@ -747,16 +749,18 @@ func (p *RARParser) parseRAR5FileHeader(data []byte, volumeIndex int, volumeName
 				return nil
 			}
 		}
-		// Validate the entire record before entering the derivation loop.
-		if password != "" {
-			derivedKeys, err := crypto.DeriveKeys([]byte(password), salt, kdfCount)
-			if err != nil || (checkValue != nil && !crypto.VerifyPassword(derivedKeys, checkValue)) {
-				return nil
-			}
-			encryptionKey = derivedKeys.Key
-		}
 		isEncrypted = true
 		encryptionIV = iv
+		encryptionSalt, encryptionCheck, encryptionKDF = salt, checkValue, kdfCount
+	}
+	// Validate the entire extra area before doing password work. A duplicate
+	// or malformed later record must not trigger a maximum-cost derivation.
+	if isEncrypted && password != "" {
+		derivedKeys, err := crypto.DeriveKeys([]byte(password), encryptionSalt, encryptionKDF)
+		if err != nil || (encryptionCheck != nil && !crypto.VerifyPassword(derivedKeys, encryptionCheck)) {
+			return nil
+		}
+		encryptionKey = derivedKeys.Key
 	}
 
 	return &RARFileEntry{

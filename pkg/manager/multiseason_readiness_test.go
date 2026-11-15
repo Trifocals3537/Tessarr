@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -102,10 +103,16 @@ func prepareMultiSeasonSymlinkMount(t *testing.T, m *Manager, parent *storage.En
 	}
 	probe := filepath.Join(m.config.DownloadFolder, "symlink-probe")
 	if err := safepath.Symlink(m.config.DownloadFolder, target, probe); err != nil {
+		if runtime.GOOS != "windows" {
+			t.Fatalf("managed symlink fixture must work on Linux: %v", err)
+		}
 		t.Skipf("managed symlinks unavailable: %v", err)
 	}
 	if _, err := os.Stat(probe); err != nil {
 		_ = os.Remove(probe)
+		if runtime.GOOS != "windows" {
+			t.Fatalf("managed symlink traversal must work on Linux: %v", err)
+		}
 		t.Skipf("managed symlink traversal unavailable: %v", err)
 	}
 	if err := os.Remove(probe); err != nil {
@@ -220,8 +227,12 @@ func seasonReadinessChild(t *testing.T, m *Manager, parent *storage.Entry) (*sto
 
 func TestMultiSeasonReadinessSourceGuards(t *testing.T) {
 	tests := map[string]func(*storage.Entry){
-		"legacy missing source":  func(e *storage.Entry) { e.SeasonSource = nil },
-		"wrong source":           func(e *storage.Entry) { e.SeasonSource.InfoHash = strings.Repeat("2", 40) },
+		"legacy missing source": func(e *storage.Entry) { e.SeasonSource = nil },
+		"wrong source":          func(e *storage.Entry) { e.SeasonSource.InfoHash = strings.Repeat("2", 40) },
+		"missing parent": func(e *storage.Entry) {
+			e.SeasonSource.InfoHash = strings.Repeat("2", 40)
+			e.InfoHash = generateSeasonHash(e.SeasonSource.InfoHash, e.SeasonSource.Season)
+		},
 		"invalid season":         func(e *storage.Entry) { e.SeasonSource.Season = 0 },
 		"wrong child identity":   func(e *storage.Entry) { e.InfoHash = "unrelated" },
 		"unrestricted child":     func(e *storage.Entry) { e.FileScopeRestricted = false },

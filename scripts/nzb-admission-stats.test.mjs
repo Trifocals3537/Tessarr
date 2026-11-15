@@ -1,13 +1,11 @@
 import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
 import test from 'node:test';
-import vm from 'node:vm';
+
+await import('../pkg/server/assets/js/nzb-admission.js');
 
 const template = readFileSync(new URL('../pkg/server/templates/stats.html', import.meta.url), 'utf8');
-const start = template.indexOf('        function updateNZBAdmissionStats(');
-const end = template.indexOf('\n        function updateStats(', start);
-assert.ok(start >= 0 && end > start, 'Stats must use the tested NZB renderer');
-const renderer = template.slice(start, end);
+assert.ok(template.includes('window.TessarrNZBAdmissions.update(stats.nzb_admission)'), 'Stats must use the tested renderer');
 
 function view() {
     const elements = new Map();
@@ -22,9 +20,7 @@ function view() {
         return elements.get(id);
     };
     return {elements, element, update(input) {
-        vm.runInNewContext(`${renderer}\nupdateNZBAdmissionStats(input);`, {
-            input, document: {getElementById: element}, formatNumber: number => number.toLocaleString('en-US'),
-        });
+        globalThis.TessarrNZBAdmissions.update(input, {getElementById: element});
     }};
 }
 

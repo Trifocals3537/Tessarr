@@ -19,6 +19,7 @@ type articleProbeFailures struct {
 	count              int
 	allArticlesMissing bool
 	first              error
+	kinds              uint16
 }
 
 func (f *articleProbeFailures) add(err error) {
@@ -30,6 +31,7 @@ func (f *articleProbeFailures) add(err error) {
 		f.first = err
 	}
 	f.count++
+	f.kinds |= rejectionMask(err)
 	if !nntp.IsArticleNotFoundError(err) {
 		f.allArticlesMissing = false
 	}
@@ -44,7 +46,15 @@ func (f *articleProbeFailures) merge(other articleProbeFailures) {
 		return
 	}
 	f.count += other.count
+	f.kinds |= other.kinds
 	f.allArticlesMissing = f.allArticlesMissing && other.allArticlesMissing
+}
+
+func (f articleProbeFailures) rejectionError() error {
+	if f.count == 0 {
+		return nil
+	}
+	return &probeFailureError{kinds: f.kinds}
 }
 
 func (f articleProbeFailures) unavailableError() error {

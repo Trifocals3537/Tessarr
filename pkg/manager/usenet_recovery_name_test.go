@@ -33,11 +33,20 @@ const recoveryNameNZB = `<?xml version="1.0" encoding="UTF-8"?>
 var recoveryNameTLSOnce sync.Once
 var recoveryNameTLSCertificate tls.Certificate
 
-func newNZBRecoveryNameTestManager(t *testing.T, statCodes ...int) *Manager {
+type nzbRecoveryFixtureOptions struct {
+	statCode  int
+	bodyCodes map[string]int
+}
+
+func newNZBRecoveryNameTestManager(t *testing.T, options ...nzbRecoveryFixtureOptions) *Manager {
 	t.Helper()
 	statCode := 223
-	if len(statCodes) > 0 {
-		statCode = statCodes[0]
+	var bodyCodes map[string]int
+	if len(options) > 0 {
+		if options[0].statCode != 0 {
+			statCode = options[0].statCode
+		}
+		bodyCodes = options[0].bodyCodes
 	}
 	config.Reset()
 	t.Cleanup(config.Reset)
@@ -45,6 +54,7 @@ func newNZBRecoveryNameTestManager(t *testing.T, statCodes ...int) *Manager {
 	m.config = config.Get()
 	m.config.DownloadFolder = t.TempDir()
 	m.config.Usenet.DiskBufferPath = t.TempDir()
+	m.config.Retries = 0
 	t.Setenv("GODEBUG", os.Getenv("GODEBUG")+",x509usefallbackroots=1")
 	recoveryNameTLSOnce.Do(func() {
 		server := httptest.NewTLSServer(nil)
@@ -101,6 +111,12 @@ func newNZBRecoveryNameTestManager(t *testing.T, statCodes ...int) *Manager {
 						}
 					case "DATE":
 						err = protocol.PrintfLine("111 20260101000000")
+					case "BODY":
+						code := bodyCodes[strings.Trim(fields[len(fields)-1], "<>")]
+						if code == 0 {
+							code = 500
+						}
+						err = protocol.PrintfLine("%d synthetic header failure", code)
 					case "QUIT":
 						_ = protocol.PrintfLine("205 bye")
 						return

@@ -5,8 +5,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -35,6 +37,7 @@ func TestNZBRejectionClassificationUsesTypedEvidence(t *testing.T) {
 		{"timeout", nntp.NewTimeoutError(errors.New("private endpoint")), nzbTimeout},
 		{"deadline", fmt.Errorf("wrapped: %w", context.DeadlineExceeded), nzbTimeout},
 		{"connection", nntp.NewConnectionError(errors.New("private host")), nzbProviderUnavailable},
+		{"connection-wrapped socket timeout", nntp.NewConnectionError(&net.OpError{Op: "read", Net: "tcp", Err: os.ErrDeadlineExceeded}), nzbTimeout},
 		{"busy", &nntp.Error{Type: nntp.ErrorTypeServerBusy}, nzbProviderUnavailable},
 		{"pool unavailable", &nntp.Error{Type: nntp.ErrorTypeNoAvailableConnection}, nzbProviderUnavailable},
 		{"cancelled", fmt.Errorf("wrapped: %w", context.Canceled), nzbCancelled},
@@ -170,7 +173,7 @@ func TestNZBAdmissionRecordsParseRejectionsBeforeQueue(t *testing.T) {
 		{"malformed XML", `<nzb><file subject="Secret.Title">`, 223, "invalid_nzb"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			m := newNZBRecoveryNameTestManager(t, test.stat)
+			m := newNZBRecoveryNameTestManager(t, nzbRecoveryFixtureOptions{statCode: test.stat})
 			req := NewNZBRequest("Synthetic.nzb", m.config.DownloadFolder, []byte(test.content), m.arr.GetOrCreate("tv"), config.DownloadActionDownload, "", ImportTypeSABnzbd, true)
 			id, err := m.AddNewNZB(m.ctx, req)
 			if err == nil || id != "" {
@@ -241,6 +244,44 @@ func TestNZBRedirectResponsesKeepInputClassification(t *testing.T) {
 				}
 			} else if stats.TotalRejected != 1 || stats.ByReason[nzbInvalidContent].Count != 1 {
 				t.Fatal("non-NZB redirect body was not classified as invalid input")
+			}
+		})
+	}
+}
+
+func TestNZBObfuscatedAdmissionPreservesFailureKinds(t *testing.T) {
+	obfuscated := strings.Replace(recoveryNameNZB, "payload.mkv", "opaque-subject", 1)
+	for _, test := range []struct {
+		name, content string
+		bodyCodes     map[string]int
+		want          string
+	}{
+		{"access denied", obfuscated, map[string]int{"payload@recovery.invalid": 481}, "access_denied"},
+		{"provider unavailable", obfuscated, map[string]int{"payload@recovery.invalid": 503}, "provider_unavailable"},
+		{"mixed", strings.Replace(obfuscated, "</nzb>", `<file poster="fixture" date="1" subject="&quot;second-opaque-subject&quot; yEnc (1/1)"><groups><group>alt.test</group></groups><segments><segment bytes="1024" number="1">second@recovery.invalid</segment></segments></file></nzb>`, 1), map[string]int{"payload@recovery.invalid": 481, "second@recovery.invalid": 430}, "mixed"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			m := newNZBRecoveryNameTestManager(t, nzbRecoveryFixtureOptions{bodyCodes: test.bodyCodes})
+			req := NewNZBRequest("Synthetic.nzb", m.config.DownloadFolder, []byte(test.content), m.arr.GetOrCreate("tv"), config.DownloadActionDownload, "", ImportTypeSABnzbd, true)
+			id, err := m.AddNewNZB(m.ctx, req)
+			if err == nil || id != "" || err.Error() != "usenet parse failed: no valid file groups found in NZB" {
+				t.Fatalf("obfuscated rejection decision/message changed: id=%q error=%v", id, err)
+			}
+			if _, lookupErr := m.queue.GetTorrent(req.Id); !storage.IsQueuedEntryNotFound(lookupErr) {
+				t.Fatalf("obfuscated rejection entered the queue: %v", lookupErr)
+			}
+			stats := m.NZBAdmissionStats()
+			if stats.TotalRejected != 1 {
+				t.Fatalf("rejection total = %d, want 1", stats.TotalRejected)
+			}
+			found := false
+			for _, reason := range stats.ByReason {
+				if reason.Count != 0 {
+					found = reason.Reason == test.want && reason.Count == 1
+				}
+			}
+			if !found {
+				t.Fatalf("obfuscated admission lost %q failure evidence: %+v", test.want, stats)
 			}
 		})
 	}

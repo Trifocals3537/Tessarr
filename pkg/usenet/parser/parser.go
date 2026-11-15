@@ -318,7 +318,10 @@ func (p *NZBParser) groupFiles(ctx context.Context, files nzbparser.NzbFiles) (m
 	groups = p.mergeObfuscatedRarGroups(groups)
 
 	if len(groups) == 0 {
-		return groups, detectionFailures.unavailableError()
+		if unavailable := detectionFailures.unavailableError(); unavailable != nil {
+			return groups, unavailable
+		}
+		return groups, detectionFailures.rejectionError()
 	}
 	return groups, nil
 }

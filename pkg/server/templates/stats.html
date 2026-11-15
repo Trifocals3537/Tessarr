@@ -1258,34 +1258,6 @@
             }
         }
 
-        function updateNZBAdmissionStats(summary) {
-            summary = summary || {};
-            const safeCount = value => {
-                const number = Number(value);
-                return Number.isFinite(number) && number > 0 ? Math.floor(number) : 0;
-            };
-            const reasons = ['articles_unavailable', 'invalid_nzb', 'access_denied', 'timeout',
-                'provider_unavailable', 'cancelled', 'mixed', 'other_parse_error'];
-            const rows = Array.isArray(summary.by_reason) ? summary.by_reason.slice(0, reasons.length) : [];
-            document.getElementById('nzb-rejections-total').textContent = formatNumber(safeCount(summary.total_rejected));
-            let visible = 0;
-            for (const code of reasons) {
-                const row = rows.find(item => item && item.reason === code);
-                const count = safeCount(row && row.count);
-                let last = '-';
-                if (row && typeof row.last_rejected_at === 'string') {
-                    const date = new Date(row.last_rejected_at);
-                    if (Number.isFinite(date.getTime())) last = date.toLocaleString();
-                }
-                document.getElementById(`nzb-count-${code}`).textContent = formatNumber(count);
-                document.getElementById(`nzb-last-${code}`).textContent = last;
-                document.getElementById(`nzb-reason-${code}`).classList.toggle('hidden', count === 0);
-                if (count > 0) visible++;
-            }
-            document.getElementById('nzb-rejections-empty').classList.toggle('hidden', visible > 0);
-            document.getElementById('nzb-rejections-table').classList.toggle('hidden', visible === 0);
-        }
-
         function updateStats(stats) {
             // System overview
             const sys = stats.system || {};
@@ -1313,7 +1285,7 @@
                 document.getElementById('queue-pending').textContent = formatNumber(stats.queue.pending || 0);
             }
 
-            updateNZBAdmissionStats(stats.nzb_admission);
+            window.TessarrNZBAdmissions.update(stats.nzb_admission);
 
             // Arr instances
             if (stats.arrs) {

@@ -1,27 +1,24 @@
 package manager
 
 import (
-	"context"
-	"net"
 	"sync"
 	"time"
 
-	"github.com/Trifocals3537/tessarr/internal/nntp"
 	"github.com/Trifocals3537/tessarr/pkg/usenet/parser"
 )
 
-type nzbRejectionReason uint8
+type nzbRejectionReason = parser.RejectionReason
 
 const (
-	nzbArticlesUnavailable nzbRejectionReason = iota
-	nzbInvalidContent
-	nzbAccessDenied
-	nzbTimeout
-	nzbProviderUnavailable
-	nzbCancelled
-	nzbMixedFailure
-	nzbOtherParseFailure
-	nzbRejectionReasonCount
+	nzbArticlesUnavailable  = parser.RejectionArticlesUnavailable
+	nzbInvalidContent       = parser.RejectionInvalidContent
+	nzbAccessDenied         = parser.RejectionAccessDenied
+	nzbTimeout              = parser.RejectionTimeout
+	nzbProviderUnavailable  = parser.RejectionProviderUnavailable
+	nzbCancelled            = parser.RejectionCancelled
+	nzbMixedFailure         = parser.RejectionMixed
+	nzbOtherParseFailure    = parser.RejectionOther
+	nzbRejectionReasonCount = parser.RejectionReasonCount
 )
 
 var nzbRejectionCodes = [nzbRejectionReasonCount]string{
@@ -53,73 +50,7 @@ type nzbAdmissionMetrics struct {
 // budget even for cyclic or unusually large error graphs. A missing-article
 // probe alone is not proof that the entire release is unavailable.
 func classifyNZBParseRejection(err error) nzbRejectionReason {
-	bit := func(reason nzbRejectionReason) uint16 { return 1 << reason }
-	remaining := 64
-	var visit func(error) uint16
-	visit = func(current error) uint16 {
-		if remaining <= 0 {
-			return bit(nzbOtherParseFailure)
-		}
-		remaining--
-		if current == nil {
-			return 0
-		}
-		switch typed := current.(type) {
-		case *parser.InvalidNZBError:
-			return bit(nzbInvalidContent)
-		case *parser.ArticlesUnavailableError:
-			return bit(nzbArticlesUnavailable)
-		case *nntp.Error:
-			switch typed.Type {
-			case nntp.ErrorTypeAuthentication, nntp.ErrorTypePermissionDenied:
-				return bit(nzbAccessDenied)
-			case nntp.ErrorTypeTimeout:
-				return bit(nzbTimeout)
-			case nntp.ErrorTypeConnection, nntp.ErrorTypeServerBusy, nntp.ErrorTypeNoAvailableConnection:
-				return bit(nzbProviderUnavailable)
-			default:
-				return bit(nzbOtherParseFailure)
-			}
-		}
-		switch current {
-		case parser.ErrNZBArticlesUnavailable:
-			return bit(nzbArticlesUnavailable)
-		case context.Canceled:
-			return bit(nzbCancelled)
-		case context.DeadlineExceeded:
-			return bit(nzbTimeout)
-		}
-		if joined, ok := current.(interface{ Unwrap() []error }); ok {
-			var reasons uint16
-			for _, child := range joined.Unwrap() {
-				if remaining <= 0 {
-					return reasons | bit(nzbOtherParseFailure)
-				}
-				reasons |= visit(child)
-			}
-			return reasons
-		}
-		if wrapped, ok := current.(interface{ Unwrap() error }); ok {
-			return visit(wrapped.Unwrap())
-		}
-		if timeout, ok := current.(net.Error); ok && timeout.Timeout() {
-			return bit(nzbTimeout)
-		}
-		return bit(nzbOtherParseFailure)
-	}
-	mask := visit(err)
-	if mask == 0 {
-		return nzbOtherParseFailure
-	}
-	if mask&(mask-1) != 0 {
-		return nzbMixedFailure
-	}
-	for reason := nzbRejectionReason(0); reason < nzbRejectionReasonCount; reason++ {
-		if mask == bit(reason) {
-			return reason
-		}
-	}
-	return nzbOtherParseFailure
+	return parser.ClassifyRejection(err)
 }
 
 func (m *Manager) recordNZBParseRejection(err error) {

@@ -22,16 +22,18 @@ diagnostic; it never changes the grouping key. Counts refer to NZB volume entrie
 not proof that every article or byte is present.
 
 RAR4 contributes typed evidence from its existing first-continuation and
-missing-final-member errors. RAR5 validates volume order before aggregating member
+missing-final-member errors only after checking the bounded member chain, including
+parts after an early orphan-continuation failure. RAR5 validates volume order before aggregating member
 parts. For an already rejected RAR5 group, the diagnostic can recognize a
 contiguous prefix or suffix from the CRC-validated/decrypted volume metadata,
 consistent continuation markers, and a corresponding member chain. Duplicate or
 gapped indices, conflicting member metadata and ambiguous boundary members do
-not supply this evidence. The original error text and wrapped causes are
+not supply this evidence. Complete RAR5 index/end metadata that contradicts a
+member's split flags also suppresses the hint. The original error text and wrapped causes are
 preserved; error text is never used to infer relatedness.
 
 Per NZB, at most 64 failed RAR groups are considered and three hints are emitted.
-A group must have at most 256 volume entries, and RAR5 boundary inspection also
+A group must have at most 256 volume entries, and both RAR4 and RAR5 boundary inspections
 limits the total parsed member entries to 256. Basenames, volume filenames and
 member names over 512 bytes are skipped rather than truncated into potential
 matches. Only counts, group numbers and fixed descriptions appear in the new

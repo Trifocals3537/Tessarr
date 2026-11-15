@@ -437,7 +437,16 @@ func (p *RARParser) parseArchive(ctx context.Context, volumes []*types.Volume, p
 	files, err := p.aggregateFileParts(allRawFiles)
 	if err != nil {
 		if boundary, ok := err.(*rarBoundaryError); ok {
-			boundary.version = version
+			if version == RARVersion4 && len(results) <= maxRARDiagnosticParts {
+				members := make([][]*RARFileEntry, len(results))
+				for i, result := range results {
+					members[i] = result.files
+				}
+				return nil, rar4GroupBoundaryFailure(boundary, members)
+			}
+			// Complete RAR5 index/end metadata contradicts a missing member
+			// boundary. Only its earlier incomplete-index path supplies hints.
+			return nil, boundary.cause
 		}
 		return nil, err
 	}

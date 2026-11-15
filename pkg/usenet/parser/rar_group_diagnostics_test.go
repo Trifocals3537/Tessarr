@@ -338,6 +338,54 @@ func TestRARGroupDiagnosticSkipsUnverifiedCompressedMethods(t *testing.T) {
 	}
 }
 
+func TestRARGroupDiagnosticSkipsConflictingContinuationMetadata(t *testing.T) {
+	for _, problem := range []string{"later size", "later method", "later encryption", "later split flag", "RAR5 terminal contradicts split"} {
+		t.Run(problem, func(t *testing.T) {
+			version := 4
+			if strings.HasPrefix(problem, "RAR5") {
+				version = 5
+			}
+			volumes, want := rarGroupDiagnosticVolumes(t, version, false, 3, 'A')
+			if version == 5 {
+				volumes[0] = rar5OrderFixtureVolume(t, []byte{1}, 0, want[:60], len(want), 16, false)
+			} else {
+				// Leave the suffix's first entry unchanged. The old early return
+				// missed contradictions in the later CRC-valid file header.
+				header := volumes[2][len(RAR4Signature)+13:]
+				size := int(binary.LittleEndian.Uint16(header[5:]))
+				switch problem {
+				case "later size":
+					binary.LittleEndian.PutUint32(header[7+4:], uint32(len(want)+1))
+				case "later method":
+					header[7+18] = RAR4CompressionMethodStore + 1
+				case "later encryption":
+					binary.LittleEndian.PutUint16(header[3:], binary.LittleEndian.Uint16(header[3:])|RAR4FileFlagEncrypted)
+				case "later split flag":
+					binary.LittleEndian.PutUint16(header[3:], binary.LittleEndian.Uint16(header[3:]) & ^uint16(RAR4FileFlagSplitBefore))
+				}
+				binary.LittleEndian.PutUint16(header, uint16(crc32.ChecksumIEEE(header[2:size])))
+			}
+			p := rarGroupDiagnosticParser(t, volumes)
+			var logs bytes.Buffer
+			p.logger = zerolog.New(zerolog.SyncWriter(&logs))
+			entry, groups, err := p.Parse(t.Context(), "Conflicting.nzb", rarGroupDiagnosticNZB(volumes, []string{"Demo-Release.part01.rar", "Demo - Release.r00", "Demo - Release.r01"}))
+			if err != nil || len(groups) != 2 {
+				t.Fatalf("conflicting fixture grouping: groups=%d err=%v", len(groups), err)
+			}
+			parsed, err := p.Process(t.Context(), entry, groups)
+			if err == nil || parsed != nil {
+				t.Fatal("conflicting continuation metadata admitted")
+			}
+			if !strings.Contains(err.Error(), "missing final volume") {
+				t.Fatalf("original prefix rejection lost: %v", err)
+			}
+			if strings.Contains(err.Error(), rarGroupDiagnosticMessage) || strings.Contains(logs.String(), rarGroupDiagnosticMessage) {
+				t.Fatalf("contradictory metadata produced a related-group hint: %v", err)
+			}
+		})
+	}
+}
+
 func rarDiagnosticTestPair() []rarGroupFailure {
 	var failures []rarGroupFailure
 	for index, base := range []string{"Private-Demo", "Private - Demo"} {
@@ -509,6 +557,40 @@ func TestRAR5GroupBoundaryEvidenceRejectsConflicts(t *testing.T) {
 			afterMembers, _ := json.Marshal(members)
 			if !reflect.DeepEqual(beforeInfos, infos) || !bytes.Equal(beforeMembers, afterMembers) {
 				t.Fatal("diagnostic changed archive metadata")
+			}
+		})
+	}
+}
+
+func TestRAR4GroupBoundaryEvidenceRequiresBoundedChain(t *testing.T) {
+	for _, problem := range []string{"control", "empty", "volumes limit", "members limit", "ambiguous boundary", "wrong boundary location"} {
+		t.Run(problem, func(t *testing.T) {
+			first := &RARFileEntry{Name: "video.mkv", UncompressedSize: 300, PackedSize: 100, IsStored: true, SplitBefore: true, SplitAfter: true}
+			last := *first
+			last.SplitAfter = false
+			members := [][]*RARFileEntry{{first}, {&last}}
+			switch problem {
+			case "empty":
+				members = nil
+			case "volumes limit":
+				members = make([][]*RARFileEntry, maxRARDiagnosticParts+1)
+			case "members limit":
+				members[1] = make([]*RARFileEntry, maxRARDiagnosticParts+1)
+			case "ambiguous boundary":
+				other := *first
+				other.Name = "other.mkv"
+				members[0] = append(members[0], &other)
+			case "wrong boundary location":
+				members = append([][]*RARFileEntry{nil}, members...)
+			}
+			original := errors.New("original orphan continuation")
+			boundary := newRARBoundaryError(original, first, true)
+			got := rar4GroupBoundaryFailure(boundary, members)
+			if got.Error() != original.Error() || !errors.Is(got, original) {
+				t.Fatal("RAR4 chain inspection changed the original rejection")
+			}
+			if (rarBoundaryFailure(got) != nil) != (problem == "control") {
+				t.Fatalf("invalid RAR4 boundary evidence: %T", got)
 			}
 		})
 	}

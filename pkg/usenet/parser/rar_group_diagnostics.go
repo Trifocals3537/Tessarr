@@ -56,6 +56,33 @@ func rarBoundaryFailure(err error) *rarBoundaryError {
 	return nil
 }
 
+// The legacy member aggregator stops at an orphan continuation. Inspect the
+// rest of that rejected group before treating the early error as evidence.
+func rar4GroupBoundaryFailure(boundary *rarBoundaryError, members [][]*RARFileEntry) error {
+	if len(members) == 0 || len(members) > maxRARDiagnosticParts {
+		return boundary.cause
+	}
+	order := make([]int, len(members))
+	entries := 0
+	for index, files := range members {
+		if len(files) > maxRARDiagnosticParts-entries {
+			return boundary.cause
+		}
+		entries += len(files)
+		order[index] = index
+	}
+	boundaryIndex := len(members) - 1
+	if boundary.missingFirst {
+		boundaryIndex = 0
+	}
+	target := rarDiagnosticBoundaryMember(members[boundaryIndex], boundary.missingFirst)
+	if target == nil || target.Name != boundary.member.name || !rarDiagnosticMemberChain(order, members, target, boundary.missingFirst) {
+		return boundary.cause
+	}
+	boundary.version = RARVersion4
+	return boundary
+}
+
 // RAR5 rejects incomplete embedded index sets before member aggregation. Only
 // attach boundary evidence for a contiguous prefix or suffix with consistent
 // end markers and member metadata. Duplicate/gapped/conflicting sets keep their
@@ -92,22 +119,27 @@ func rar5GroupBoundaryFailure(cause error, infos []*rar5VolumeInfo, members [][]
 	if missingFirst {
 		boundaryIndex = order[0]
 	}
-	var target *RARFileEntry
-	for _, file := range members[boundaryIndex] {
-		if file == nil || file.IsDirectory || (missingFirst && !file.SplitBefore) || (!missingFirst && !file.SplitAfter) {
-			continue
-		}
-		if target != nil { // Multiple boundary members are ambiguous.
-			return cause
-		}
-		target = file
-	}
+	target := rarDiagnosticBoundaryMember(members[boundaryIndex], missingFirst)
 	if target == nil || !rarDiagnosticMemberChain(order, members, target, missingFirst) {
 		return cause
 	}
 	boundary := newRARBoundaryError(cause, target, missingFirst)
 	boundary.version = RARVersion5
 	return boundary
+}
+
+func rarDiagnosticBoundaryMember(files []*RARFileEntry, missingFirst bool) *RARFileEntry {
+	var target *RARFileEntry
+	for _, file := range files {
+		if file == nil || file.IsDirectory || (missingFirst && !file.SplitBefore) || (!missingFirst && !file.SplitAfter) {
+			continue
+		}
+		if target != nil { // Multiple boundary members are ambiguous.
+			return nil
+		}
+		target = file
+	}
+	return target
 }
 
 func rarDiagnosticMemberChain(order []int, members [][]*RARFileEntry, target *RARFileEntry, missingFirst bool) bool {

@@ -90,6 +90,32 @@ seasons, replace the child's title, or inflate its size to the parent transfer.
 Readiness requires every scoped file and its link, while unrelated seasons do not
 block the child. Child placement maps are independent copies limited to that scope.
 
+Season children also persist the source torrent hash and season number in
+append-only protobuf fields 51 and 52. They remain queue-only jobs: initial
+symlink readiness and later retries load the authoritative parent from main
+storage instead of looking up the synthetic child hash. The source resolver
+checks the derived child identity, active placement, complete season file scope,
+stable canonical file IDs, paths, sizes, byte ranges and provider file mappings.
+Children retain independent copies of canonical files, including their IDs.
+Retries resolve the parent's mount folder under every mount-naming policy and
+do not publish a second main entry for the synthetic child hash.
+
+Readiness reloads and validates that source after the sampled reads. A deleted
+source, changed placement or scope, or a same-content republish during the check
+fails verification. Cancellation still reaches the underlying reads. A parent
+is completed only after every season action succeeds; child failures remain
+visible in their queue rows and propagate to the parent's normal error path.
+Generated season titles replace a parent's episode token with the child's
+season, without changing the original source-folder identity.
+
+Legacy season rows without the source reference are rejected with an explicit
+instruction to re-import the parent. No relationship is guessed from titles or
+file hashes, and existing queue history is not migrated automatically. An older
+binary ignores the appended fields and can discard them when rewriting a row,
+so review unfinished season jobs before rolling back. This change does not
+interpret upstream release URLs or resolve the separate selection-hint question
+described in issue #23.
+
 Fresh acknowledged attempts retain the existing bounded rollback behavior.
 Cleanup intent is durable before DELETE, and successful cleanup is checkpointed
 before another provider may be attempted. Failed cleanup stops fallback.

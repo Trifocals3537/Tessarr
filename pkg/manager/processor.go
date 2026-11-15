@@ -606,6 +606,15 @@ func (m *Manager) processAction(ctx context.Context, entry *storage.Entry) error
 		Str("action", string(entry.Action)).
 		Msg("Download completed, processing action")
 
+	if entry.SeasonSource != nil || entry.FileScopeRestricted {
+		if _, err := m.seasonSource(entry); err != nil {
+			return err
+		}
+		// A resumed season is still a queue-only view of its parent. Publishing
+		// its synthetic hash to main storage would invent a second provider and
+		// mount identity rather than repairing the original relationship.
+		return m.downloader.download(ctx, entry)
+	}
 	// Merge with existing entry if same infohash already exists (e.g., same
 	// torrent on a different provider). The queue entry only knows about the
 	// provider it was queued for, so we need to preserve other placements.

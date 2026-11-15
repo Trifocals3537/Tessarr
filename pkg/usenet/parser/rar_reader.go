@@ -213,6 +213,7 @@ type parseRAR5StreamResult struct {
 	IsHeaderEncrypted bool
 	EncryptionKey     []byte // AES key for file data decryption (if encrypted)
 	EncryptionIV      []byte // AES IV for file data decryption (if encrypted)
+	volumeInfo        *rar5VolumeInfo
 }
 
 // parseRAR5Stream parses RAR 5.0 headers from a stream reader
@@ -284,6 +285,9 @@ func (p *RARParser) parseRAR5Stream(stream *rarReader, volumeIndex int, volumeNa
 				if err != nil {
 					return nil, fmt.Errorf("failed to read encrypted RAR5 header: %w", err)
 				}
+				if err := result.recordVolumeHeader(encHeader, encDataSize); err != nil {
+					return nil, err
+				}
 
 				// Parse the decrypted header
 				if encHeader.Type == RAR5HeaderTypeFile {
@@ -319,6 +323,9 @@ func (p *RARParser) parseRAR5Stream(stream *rarReader, volumeIndex int, volumeNa
 		}
 
 		// Data offset is immediately after the header (absolute position in stream)
+		if err := result.recordVolumeHeader(header, dataSize); err != nil {
+			return nil, err
+		}
 		dataOffsetAbsolute := headerStartPos + int64(headerSize)
 
 		// Parse file headers
@@ -525,9 +532,10 @@ func (p *RARParser) readRAR5HeaderFromStream(stream io.Reader) (*rar5HeaderData,
 	totalHeaderSize := 4 + headerSizeVintBytes + int(headerSize)
 
 	return &rar5HeaderData{
-		Type:  headerType,
-		Flags: headerFlags,
-		Data:  headerData,
+		Type:      headerType,
+		Flags:     headerFlags,
+		Data:      headerData,
+		ExtraSize: int(extraAreaSize),
 	}, totalHeaderSize, dataAreaSize, nil
 }
 

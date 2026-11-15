@@ -117,10 +117,19 @@ func integrityRAR5Volume(payload []byte, total int, splitFlags uint64) []byte {
 	body = binary.LittleEndian.AppendUint32(body, crc32.ChecksumIEEE(payload))
 	body = append(body, 0, 0, 9) // stored, host OS, name length
 	body = append(body, "video.mkv"...)
-	volume := append([]byte(RAR5Signature), integrityRAR5Block(RAR5HeaderTypeMain, 0, 0, []byte{1})...)
+	main := []byte{RAR5MainFlagVolume}
+	if splitFlags&RAR5HeaderFlagSplitBefore != 0 {
+		// This fixture builds the first or second volume of a two-part set.
+		main = []byte{RAR5MainFlagVolume | RAR5MainFlagVolumeNumber, 1}
+	}
+	volume := append([]byte(RAR5Signature), integrityRAR5Block(RAR5HeaderTypeMain, 0, 0, main)...)
 	volume = append(volume, integrityRAR5Block(RAR5HeaderTypeFile, RAR5HeaderFlagDataArea|splitFlags, len(payload), body)...)
 	volume = append(volume, payload...)
-	return append(volume, integrityRAR5Block(RAR5HeaderTypeEndOfArc, 0, 0, []byte{0})...)
+	end := byte(0)
+	if splitFlags&RAR5HeaderFlagSplitAfter != 0 {
+		end = 1
+	}
+	return append(volume, integrityRAR5Block(RAR5HeaderTypeEndOfArc, 0, 0, []byte{end})...)
 }
 
 // The NZB counters repeat and both article and volume order are scrambled.

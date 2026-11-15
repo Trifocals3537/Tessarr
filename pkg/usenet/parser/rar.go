@@ -94,6 +94,7 @@ type RARArchiveInfo struct {
 	IsDataEncrypted   bool   // File data is encrypted
 	EncryptionKey     []byte // AES-256 key derived from password (32 bytes)
 	Files             []*RARFileEntry
+	VolumeOrder       []int // Original volume descriptor positions in validated order.
 }
 
 // RARFileEntry represents a file within the RAR archive
@@ -160,12 +161,6 @@ func (p *RARParser) Process(ctx context.Context, group *FileGroup, password stri
 	filename := group.BaseName
 	filename = utils.RemoveInvalidChars(path.Base(filename))
 
-	// Build base segments and volume info
-	baseSegments, volumeInfos, _ := buildBaseSegments(group)
-	if len(baseSegments) == 0 {
-		return nil, fmt.Errorf("no base segments found for RAR volumes")
-	}
-
 	// Parse RAR archive to get file entries with volume parts
 	archiveInfo, err := p.parseArchive(ctx, volumes, password)
 	if err != nil {
@@ -175,6 +170,10 @@ func (p *RARParser) Process(ctx context.Context, group *FileGroup, password stri
 	// Check if archive has encrypted headers and we couldn't parse it
 	if archiveInfo.IsHeaderEncrypted && len(archiveInfo.Files) == 0 {
 		return nil, fmt.Errorf("RAR archive has encrypted headers; password required or incorrect")
+	}
+	baseSegments, volumeInfos, err := buildRARBaseSegments(volumes, archiveInfo.VolumeOrder)
+	if err != nil {
+		return nil, err
 	}
 
 	// Build volume offset map
@@ -281,6 +280,7 @@ func (p *RARParser) parseArchive(ctx context.Context, volumes []*types.Volume, p
 		files             []*RARFileEntry
 		isHeaderEncrypted bool
 		encryptionKey     []byte // AES-256 key for encrypted file data
+		volumeInfo        *rar5VolumeInfo
 		err               error
 	}
 
@@ -327,6 +327,8 @@ func (p *RARParser) parseArchive(ctx context.Context, volumes []*types.Volume, p
 		// Parse this volume's file entries
 		var volumeFiles []*RARFileEntry
 		var isEncrypted bool
+		var encryptionKey []byte
+		var volumeInfo *rar5VolumeInfo
 		var err error
 
 		switch version {
@@ -337,10 +339,8 @@ func (p *RARParser) parseArchive(ctx context.Context, volumes []*types.Volume, p
 			} else if result != nil {
 				volumeFiles = result.Files
 				isEncrypted = result.IsHeaderEncrypted
-				// Store the encryption key from first encrypted volume
-				if len(result.EncryptionKey) > 0 {
-					return volumeResult{index: volIdx, files: volumeFiles, isHeaderEncrypted: isEncrypted, encryptionKey: result.EncryptionKey, err: nil}
-				}
+				encryptionKey = result.EncryptionKey
+				volumeInfo = result.volumeInfo
 			}
 		case RARVersion4:
 			volumeFiles, err = p.parseRAR4Stream(stream, volIdx, vol.Name, vol.Size)
@@ -352,7 +352,7 @@ func (p *RARParser) parseArchive(ctx context.Context, volumes []*types.Volume, p
 			return volumeResult{index: volIdx, files: nil, err: err}
 		}
 
-		return volumeResult{index: volIdx, files: volumeFiles, isHeaderEncrypted: isEncrypted, err: nil}
+		return volumeResult{index: volIdx, files: volumeFiles, isHeaderEncrypted: isEncrypted, encryptionKey: encryptionKey, volumeInfo: volumeInfo}
 	})
 
 	// Sort results by index to maintain order and collect files
@@ -360,7 +360,7 @@ func (p *RARParser) parseArchive(ctx context.Context, volumes []*types.Volume, p
 		return results[i].index < results[j].index
 	})
 
-	var allRawFiles []*RARFileEntry
+	fileCount := 0
 	isHeaderEncrypted := false
 	for _, result := range results {
 		if result.err != nil {
@@ -369,11 +369,11 @@ func (p *RARParser) parseArchive(ctx context.Context, volumes []*types.Volume, p
 		if result.isHeaderEncrypted {
 			isHeaderEncrypted = true
 		}
-		allRawFiles = append(allRawFiles, result.files...)
+		fileCount += len(result.files)
 	}
 
 	// If headers are encrypted, we can't list files without password
-	if isHeaderEncrypted && len(allRawFiles) == 0 {
+	if isHeaderEncrypted && fileCount == 0 {
 		return &RARArchiveInfo{
 			Version:           version,
 			IsMultiVol:        len(volumes) > 1,
@@ -382,9 +382,40 @@ func (p *RARParser) parseArchive(ctx context.Context, volumes []*types.Volume, p
 		}, nil
 	}
 
-	if len(allRawFiles) == 0 {
+	if fileCount == 0 {
 		return nil, fmt.Errorf("no files found in any RAR volume")
 	}
+	order := make([]int, len(results))
+	for i := range order {
+		order[i] = i
+	}
+	if version == RARVersion5 {
+		infos := make([]*rar5VolumeInfo, len(results))
+		for i, result := range results {
+			if result.isHeaderEncrypted != results[0].isHeaderEncrypted {
+				return nil, fmt.Errorf("inconsistent RAR5 header encryption across volumes")
+			}
+			infos[i] = result.volumeInfo
+		}
+		var err error
+		order, err = rar5VolumeOrder(infos)
+		if err != nil {
+			return nil, err
+		}
+	}
+	var allRawFiles []*RARFileEntry
+	ordered := make([]volumeResult, len(results))
+	for index, original := range order {
+		ordered[index] = results[original]
+		for _, file := range ordered[index].files {
+			file.VolumeIndex = index
+			for _, part := range file.VolumeParts {
+				part.PartNumber = index
+			}
+		}
+		allRawFiles = append(allRawFiles, ordered[index].files...)
+	}
+	results = ordered
 
 	var encryptionKey []byte
 	for _, result := range results {
@@ -408,6 +439,7 @@ func (p *RARParser) parseArchive(ctx context.Context, volumes []*types.Volume, p
 		IsDataEncrypted:   len(encryptionKey) > 0,
 		EncryptionKey:     encryptionKey,
 		Files:             files,
+		VolumeOrder:       order,
 	}
 	return archiveInfo, nil
 }
@@ -498,9 +530,10 @@ func (p *RARParser) parseRAR5Headers(data []byte, volumeIndex int, volumeName st
 
 // rar5HeaderData represents a RAR 5.0 header
 type rar5HeaderData struct {
-	Type  uint64
-	Flags uint64
-	Data  []byte
+	Type      uint64
+	Flags     uint64
+	Data      []byte
+	ExtraSize int
 }
 
 // readRAR5Header reads a single RAR 5.0 header
@@ -536,8 +569,9 @@ func (p *RARParser) readRAR5Header(r *bytes.Reader) (*rar5HeaderData, int, int64
 	}
 
 	// Read extra area size if present
+	var extraAreaSize uint64
 	if headerFlags&RAR5HeaderFlagExtraArea != 0 {
-		_, err = readVInt(r)
+		extraAreaSize, err = readVInt(r)
 		if err != nil {
 			return nil, 0, 0, err
 		}
@@ -564,6 +598,9 @@ func (p *RARParser) readRAR5Header(r *bytes.Reader) (*rar5HeaderData, int, int64
 		return nil, 0, 0, fmt.Errorf("invalid header size calculation: remaining=%d (headerSize=%d, consumed=%d)",
 			remainingHeaderSize, headerSize, consumedSize)
 	}
+	if extraAreaSize > uint64(remainingHeaderSize) {
+		return nil, 0, 0, fmt.Errorf("RAR5 extra area exceeds header body")
+	}
 
 	var headerData []byte
 	if remainingHeaderSize > 0 {
@@ -576,9 +613,10 @@ func (p *RARParser) readRAR5Header(r *bytes.Reader) (*rar5HeaderData, int, int64
 	totalHeaderSize := int(headerSize) + 4 // Include CRC
 
 	return &rar5HeaderData{
-		Type:  headerType,
-		Flags: headerFlags,
-		Data:  headerData,
+		Type:      headerType,
+		Flags:     headerFlags,
+		Data:      headerData,
+		ExtraSize: int(extraAreaSize),
 	}, totalHeaderSize, dataAreaSize, nil
 }
 

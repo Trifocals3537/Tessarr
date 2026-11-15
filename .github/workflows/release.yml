@@ -388,7 +388,6 @@ jobs:
           images: ${{ env.GHCR_IMAGE }}
           tags: |
             type=raw,value=${{ needs.prepare.outputs.version }}
-            type=raw,value=${{ needs.prepare.outputs.channel }},enable=${{ needs.prepare.outputs.channel != 'stable' }}
             type=raw,value=latest,enable=${{ needs.prepare.outputs.channel == 'stable' }}
           labels: |
             org.opencontainers.image.title=Tessarr

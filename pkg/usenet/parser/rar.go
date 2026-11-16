@@ -273,6 +273,11 @@ func (p *RARParser) parseArchive(ctx context.Context, volumes []*types.Volume, p
 	if version == RARVersionUnknown {
 		return nil, fmt.Errorf("unknown RAR format")
 	}
+	if version == RARVersion4 {
+		if err := validateRAR4VolumeLabels(volumes); err != nil {
+			return nil, err
+		}
+	}
 
 	// Parse ALL volumes in parallel using worker pool
 	type volumeResult struct {

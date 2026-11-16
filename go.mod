@@ -7,7 +7,7 @@ require (
 	github.com/Tensai75/rapidyenc v0.0.1
 	github.com/anacrolix/torrent v1.62.0
 	github.com/bytedance/sonic v1.15.0
-	github.com/go-chi/chi/v5 v5.3.0
+	github.com/go-chi/chi/v5 v5.4.0
 	github.com/go-co-op/gocron/v2 v2.16.1
 	github.com/gofrs/flock v0.13.0
 	github.com/google/uuid v1.6.0

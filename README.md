@@ -140,6 +140,9 @@ for verification and managed-host guidance.
 
 ## Documentation
 
+See the [Tessarr wiki](https://github.com/Trifocals3537/Tessarr/wiki) for setup,
+configuration, troubleshooting, and development guides.
+
 See the [documentation source](docs/src/content/docs/) while Tessarr's
 standalone documentation site is being prepared.
 

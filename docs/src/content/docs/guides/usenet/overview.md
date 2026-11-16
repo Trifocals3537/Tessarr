@@ -210,19 +210,19 @@ Streams use disk buffer for assembly. Ensure sufficient disk space.
 
 ## Repair
 
-```json
-{
-  "usenet": {
-    "skip_repair": false
-  }
-}
-```
+The health checker can detect missing articles and coordinate replacement
+through Sonarr or Radarr. See [Health Checker & Repair](../../repair/).
+
+For an existing plain-file NZB, [manual PAR2 recovery](../par2-recovery/)
+can reconstruct missing or corrupt data when the original NZB contains enough
+usable recovery data. Start it explicitly on the Repair page and supply the
+original NZB when requested. There is no `usenet.skip_repair` option.
 
 ## Arr Integration
 
 Arrs send NZB files to Tessarr via the Sabnzbd API endpoint:
 
-See [Sabnzbd Integration](./sabnzbd/) for details.
+See [Sabnzbd Integration](../sabnzbd/) for details.
 
 If every configured provider reports that a required article is missing during
 NZB admission, Tessarr reports a release rejection through the SAB-compatible
@@ -253,7 +253,7 @@ can retry them later.
 
 ### Incomplete Downloads
 
-- Enable `skip_repair: false` for PAR2 repair
+- For an existing plain-file NZB, try [manual PAR2 recovery](../par2-recovery/)
 - Check provider retention (old files may be incomplete)
 - Try backup provider if available
 
@@ -281,8 +281,7 @@ Full Usenet config with optimal settings:
     "read_ahead": "32MB",
     "processing_timeout": "15m",
     "availability_sample_percent": 5,
-    "disk_buffer_path": "/cache/usenet",
-    "skip_repair": false
+    "disk_buffer_path": "/cache/usenet"
   }
 }
 ```

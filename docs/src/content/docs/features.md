@@ -7,6 +7,7 @@ description: What can Tessarr do?
 
 - **Hybrid**: Support for both Debrid and Usenet.
 - **Repair**: Checks and fixes missing files.
+- **Manual PAR2 recovery**: Reconstruct missing data in existing plain-file NZBs using a matching original NZB and available parity. [Supported files and limits](../guides/usenet/par2-recovery/).
 - **Performance**: Custom DFS implementation for fast start.
 - **Arrs**: Sonarr/Radarr support.
 - **Flexible torrent imports**: Add magnet links, torrent URLs/files, or raw v1 infohashes.

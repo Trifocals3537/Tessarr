@@ -49,6 +49,7 @@ export default defineConfig({
                     label: 'Usenet',
                     items: [
                         {label: 'Overview', link: '/guides/usenet/overview'},
+                        {label: 'Manual PAR2 Recovery', link: '/guides/usenet/par2-recovery'},
                         {label: 'Sabnzbd API', link: '/guides/usenet/sabnzbd'},
                     ],
                 },

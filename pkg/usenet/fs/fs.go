@@ -29,17 +29,22 @@ type PrefetchableReaderAt interface {
 
 // FS implements fs.FS for RAR volumes backed by NNTP Segments
 type FS struct {
-	pools         *reader.Pools
-	ctx           context.Context
-	volumes       *xsync.Map[string, *types.Volume]
-	client        *nntp.Client // Connection client for all readers
-	maxConcurrent int          // Max concurrent connections per reader
-	prefetchSize  int64        // Prefetch size in bytes
-	logger        zerolog.Logger
+	recoveredArticle func(context.Context, reader.SegmentMeta, io.Writer) (bool, error)
+	pools            *reader.Pools
+	ctx              context.Context
+	volumes          *xsync.Map[string, *types.Volume]
+	client           *nntp.Client // Connection client for all readers
+	maxConcurrent    int          // Max concurrent connections per reader
+	prefetchSize     int64        // Prefetch size in bytes
+	logger           zerolog.Logger
 }
 
 // Option configures the filesystem
 type Option func(*FS)
+
+func WithRecoveredArticle(fn func(context.Context, reader.SegmentMeta, io.Writer) (bool, error)) Option {
+	return func(f *FS) { f.recoveredArticle = fn }
+}
 
 // WithPools shares one service-run memory budget with every filesystem reader.
 func WithPools(pools *reader.Pools) Option {
@@ -228,6 +233,7 @@ func (f *FS) createNewReaderForVolume(vol *types.Volume) (PrefetchableReaderAt, 
 			reader.WithPrefetchAhead(readerConfig.PrefetchAhead),
 			reader.WithDiskPath(readerConfig.DiskPath),
 			reader.WithPools(f.pools),
+			reader.WithRecoveredArticle(f.recoveredArticle),
 		)
 	} else {
 		streamReader, err = reader.NewStreamingReader(
@@ -239,6 +245,7 @@ func (f *FS) createNewReaderForVolume(vol *types.Volume) (PrefetchableReaderAt, 
 			reader.WithPrefetchAhead(readerConfig.PrefetchAhead),
 			reader.WithDiskPath(readerConfig.DiskPath),
 			reader.WithPools(f.pools),
+			reader.WithRecoveredArticle(f.recoveredArticle),
 		)
 	}
 

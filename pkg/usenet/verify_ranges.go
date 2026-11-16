@@ -14,6 +14,7 @@ import (
 	"github.com/Trifocals3537/tessarr/internal/customerror"
 	"github.com/Trifocals3537/tessarr/internal/nntp"
 	"github.com/Trifocals3537/tessarr/pkg/storage"
+	"github.com/Trifocals3537/tessarr/pkg/usenet/recovery"
 )
 
 type metadataFingerprint struct {
@@ -37,6 +38,13 @@ func repairAccountsFingerprint(providers []config.UsenetProvider) string {
 // every use; normal metadata writes atomically replace the file.
 func (u *Usenet) FileRepairFingerprint(id, name string) (string, error) {
 	accountKey := repairAccountsFingerprint(config.Get().Usenet.Providers)
+	if u.recovery != nil && u.recovery.Store().HasTarget(id, name) {
+		file, err := u.getFile(id, name)
+		if err != nil {
+			return "", err
+		}
+		accountKey += ":" + u.recovery.Store().Revision(recovery.Generation(*file))
+	}
 	u.nzbStorage.mu.RLock()
 	defer u.nzbStorage.mu.RUnlock()
 	path, err := u.nzbStorage.metaFilePath(id)

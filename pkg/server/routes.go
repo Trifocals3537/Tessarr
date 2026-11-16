@@ -67,6 +67,12 @@ func (s *Server) WebRoutes() http.Handler {
 			r.Get("/repair/health/{name}", s.handleGetEntryHealth)
 			r.Post("/repair/health/{name}/check", s.handleRecheckEntry)
 
+			// Manual PAR2 recovery for existing plain-file NZBs
+			r.Get("/usenet/recovery/targets", s.handlePAR2Targets)
+			r.Get("/usenet/recovery/jobs", s.handlePAR2Jobs)
+			r.Post("/usenet/recovery/jobs", s.handleStartPAR2)
+			r.Delete("/usenet/recovery/jobs/{id}", s.handleCancelPAR2)
+
 			// Cleanup recovery
 			r.Get("/cleanup/workflows", s.handleCleanupWorkflows)
 			r.Post("/cleanup/workflows/{key}/resolve", s.handleResolveCleanup)

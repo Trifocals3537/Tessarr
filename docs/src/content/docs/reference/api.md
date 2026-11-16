@@ -18,6 +18,17 @@ Get API token from **Settings** → **Auth** after login.
 
 ## Endpoints
 
+### Manual Usenet PAR2 recovery
+
+Use `/api/usenet/recovery/targets` to find an existing plain file, then submit
+its `nzb_id` and `file` to `/api/usenet/recovery/jobs`. Supply a matching original
+NZB as the multipart `source` field the first time; later JSON requests can reuse
+the verified copy. `GET /api/usenet/recovery/jobs` returns status and limits;
+`DELETE /api/usenet/recovery/jobs/{id}` cancels queued or running work.
+
+See [manual PAR2 recovery](../../guides/usenet/par2-recovery/) for examples,
+supported layouts, bandwidth costs, and restart behavior.
+
 ### GET /version
 
 Get Tessarr version.

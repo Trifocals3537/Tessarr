@@ -24,6 +24,7 @@ import (
 	"github.com/Trifocals3537/tessarr/pkg/usenet/fs"
 	"github.com/Trifocals3537/tessarr/pkg/usenet/fs/reader"
 	"github.com/Trifocals3537/tessarr/pkg/usenet/parser"
+	"github.com/Trifocals3537/tessarr/pkg/usenet/recovery"
 	"github.com/Trifocals3537/tessarr/pkg/usenet/types"
 	"github.com/puzpuzpuz/xsync/v4"
 	"github.com/rs/zerolog"
@@ -61,6 +62,7 @@ type fsEntry struct {
 	readerCleanup func()                  // Cleanup function for reader
 	readerOnce    sync.Once               // Ensures reader is created exactly once
 	readerErr     error                   // Error from reader creation (if any)
+	wrapReader    func(fs.PrefetchableReaderAt) fs.PrefetchableReaderAt
 	refCount      atomic.Int32
 	lastAccessed  atomic.Int64 // Unix timestamp
 }
@@ -128,6 +130,9 @@ func (fe *fsEntry) getOrCreateReader() (fs.PrefetchableReaderAt, int64, error) {
 			return
 		}
 
+		if fe.wrapReader != nil {
+			readerAt = fe.wrapReader(readerAt)
+		}
 		fe.reader = readerAt
 		fe.readerSize = size
 		fe.readerCleanup = cleanup
@@ -208,6 +213,7 @@ func (r *contextSectionReader) Read(p []byte) (int, error) {
 }
 
 type Usenet struct {
+	recovery                 *recovery.Service
 	repairFingerprintMu      sync.Mutex
 	repairFingerprints       map[string]metadataFingerprint
 	bufferPools              *reader.Pools
@@ -308,6 +314,13 @@ func New() (*Usenet, error) {
 	}
 	u.initLifecycle()
 
+	u.recovery, err = recovery.OpenService(u.ctx, u.recoveryPath(), recoveryHost{u: u})
+	if err != nil {
+		u.logger.Warn().Err(err).Msg("Manual PAR2 recovery is unavailable; existing Usenet access remains active")
+	} else {
+		u.recovery.Begin()
+	}
+
 	// Both workers belong to this instance. Close cancels and joins them before
 	// a replacement instance can touch the same metadata or stream state.
 	u.startBackground(func(ctx context.Context) {
@@ -373,15 +386,25 @@ func (u *Usenet) createEntryWithReadLimits(file *storage.NZBFile, maxConcurrent 
 		volumes,
 		u.logger,
 		fs.WithPools(u.bufferPools),
+		fs.WithRecoveredArticle(u.recoveredArticle(file)),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create usenet FS: %w", err)
 	}
 
-	return &fsEntry{
+	entry := &fsEntry{
 		fs:      usenetFS,
 		volumes: volumes,
-	}, nil
+	}
+	if u.recovery != nil && recovery.Eligible(file) == nil {
+		gen := recovery.Generation(*file)
+		size := file.Size
+		store := u.recovery.Store()
+		entry.wrapReader = func(base fs.PrefetchableReaderAt) fs.PrefetchableReaderAt {
+			return &recoveredReader{base: base, store: store, generation: gen, size: size}
+		}
+	}
+	return entry, nil
 }
 
 // getOrCreateEntry returns the fsEntry and its cache key to avoid redundant key computation.
@@ -778,11 +801,18 @@ func (u *Usenet) CheckFile(ctx context.Context, nzoID, filename string) error {
 	if len(messageIDs) == 0 {
 		return fmt.Errorf("file has no Segments: %s", filename)
 	}
+	if u.recovery != nil && u.recovery.Store().HasTarget(nzoID, filename) {
+		file, e := u.getFile(nzoID, filename)
+		if e != nil {
+			return e
+		}
+		messageIDs = u.unpatchedSamples(ctx, nzoID, file, messageIDs)
+	}
 	return u.checkAvailabilityMode(ctx, filename, messageIDs, true)
 }
 
 func (u *Usenet) CheckFileAvailability(ctx context.Context, file *storage.NZBFile, samplePercent int) error {
-	return u.checkAvailability(ctx, file.Name, u.sampleSegments(file.Segments, samplePercent))
+	return u.checkAvailability(ctx, file.Name, u.unpatchedSamples(ctx, file.NzbID, file, u.sampleSegments(file.Segments, samplePercent)))
 }
 
 // checkAvailability batch-STATs the given sampled message ids. The NNTP client
@@ -924,6 +954,9 @@ func (u *Usenet) close() error {
 			return true
 		})
 		u.fs.Clear()
+	}
+	if u.recovery != nil {
+		closeErr = errors.Join(closeErr, u.recovery.Close())
 	}
 	if u.bufferPools != nil {
 		closeErr = errors.Join(closeErr, u.bufferPools.Close())
@@ -1448,6 +1481,9 @@ func (u *Usenet) Delete(nzoID string) error {
 	nzb, err := u.nzbStorage.GetNZBHeader(nzoID)
 	if err != nil {
 		if IsNZBNotFound(err) {
+			if u.recovery != nil {
+				return u.recovery.ForgetNZB(nzoID)
+			}
 			return nil
 		}
 		return fmt.Errorf("failed to get NZB: %w", err)
@@ -1457,34 +1493,40 @@ func (u *Usenet) Delete(nzoID string) error {
 	if err != nil {
 		return fmt.Errorf("refusing unsafe persisted NZB path: %w", err)
 	}
-	if sourcePath != "" {
-		processingPath, pathErr := metadataFilePath(u.metadataDir, nzoID, nzbProcessingSuffix)
-		if pathErr != nil {
-			return pathErr
+	remove := func() error {
+		if sourcePath != "" {
+			processingPath, pathErr := metadataFilePath(u.metadataDir, nzoID, nzbProcessingSuffix)
+			if pathErr != nil {
+				return pathErr
+			}
+			processedPath, pathErr := metadataFilePath(u.metadataDir, nzoID, nzbProcessedSuffix)
+			if pathErr != nil {
+				return pathErr
+			}
+			failedPath, pathErr := metadataFilePath(u.metadataDir, nzoID, nzbFailedSuffix)
+			if pathErr != nil {
+				return pathErr
+			}
+			if err := errors.Join(
+				removeMetadataFileIfExists(u.metadataDir, sourcePath),
+				removeMetadataFileIfExists(u.metadataDir, processingPath),
+				removeMetadataFileIfExists(u.metadataDir, processedPath),
+				removeMetadataFileIfExists(u.metadataDir, failedPath),
+			); err != nil {
+				return fmt.Errorf("remove NZB source artifacts: %w", err)
+			}
 		}
-		processedPath, pathErr := metadataFilePath(u.metadataDir, nzoID, nzbProcessedSuffix)
-		if pathErr != nil {
-			return pathErr
-		}
-		failedPath, pathErr := metadataFilePath(u.metadataDir, nzoID, nzbFailedSuffix)
-		if pathErr != nil {
-			return pathErr
-		}
-		if err := errors.Join(
-			removeMetadataFileIfExists(u.metadataDir, sourcePath),
-			removeMetadataFileIfExists(u.metadataDir, processingPath),
-			removeMetadataFileIfExists(u.metadataDir, processedPath),
-			removeMetadataFileIfExists(u.metadataDir, failedPath),
-		); err != nil {
-			return fmt.Errorf("remove NZB source artifacts: %w", err)
-		}
-	}
 
-	// Delete from file-based storage
-	if err := u.nzbStorage.DeleteNZB(nzoID); err != nil {
-		return fmt.Errorf("failed to delete NZB from storage: %w", err)
+		// Delete from file-based storage
+		if err := u.nzbStorage.DeleteNZB(nzoID); err != nil {
+			return fmt.Errorf("failed to delete NZB from storage: %w", err)
+		}
+		return nil
 	}
-	return nil
+	if u.recovery != nil {
+		return u.recovery.RemoveNZB(nzoID, remove)
+	}
+	return remove()
 }
 
 // PendingNZB is an unmanaged NZB file claimed by the metadata-directory watcher.

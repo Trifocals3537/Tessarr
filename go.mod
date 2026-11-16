@@ -6,20 +6,20 @@ require (
 	github.com/Tensai75/nzbparser v0.1.0
 	github.com/Tensai75/rapidyenc v0.0.1
 	github.com/anacrolix/torrent v1.62.0
-	github.com/bytedance/sonic v1.15.0
-	github.com/go-chi/chi/v5 v5.3.0
-	github.com/go-co-op/gocron/v2 v2.16.1
-	github.com/gofrs/flock v0.13.0
+	github.com/bytedance/sonic v1.15.5
+	github.com/go-chi/chi/v5 v5.5.0
+	github.com/go-co-op/gocron/v2 v2.23.1
+	github.com/gofrs/flock v0.13.2
 	github.com/google/uuid v1.6.0
 	github.com/gorilla/sessions v1.4.0
-	github.com/hanwen/go-fuse/v2 v2.11.0
+	github.com/hanwen/go-fuse/v2 v2.12.1
 	github.com/hashicorp/go-retryablehttp v0.7.8
 	github.com/javi11/sevenzip v1.6.2-0.20251026160715-ca961b7f1239
-	github.com/klauspost/compress v1.20.2
+	github.com/klauspost/compress v1.20.4
 	github.com/puzpuzpuz/xsync/v3 v3.5.1
-	github.com/puzpuzpuz/xsync/v4 v4.1.0
+	github.com/puzpuzpuz/xsync/v4 v4.5.0
 	github.com/robfig/cron/v3 v3.0.1
-	github.com/rs/zerolog v1.33.0
+	github.com/rs/zerolog v1.35.1
 	github.com/sourcegraph/conc v0.3.0
 	github.com/stanNthe5/stringbuf v0.0.3
 	github.com/winfsp/cgofuse v1.6.0
@@ -45,7 +45,7 @@ require (
 	github.com/bodgit/plumbing v1.3.0 // indirect
 	github.com/bodgit/windows v1.0.1 // indirect
 	github.com/bytedance/gopkg v0.1.3 // indirect
-	github.com/bytedance/sonic/loader v0.5.0 // indirect
+	github.com/bytedance/sonic/loader v0.5.3 // indirect
 	github.com/cloudwego/base64x v0.1.6 // indirect
 	github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc // indirect
 	github.com/gorilla/securecookie v1.1.2 // indirect
@@ -61,7 +61,6 @@ require (
 	github.com/multiformats/go-multihash v0.2.3 // indirect
 	github.com/multiformats/go-varint v0.0.6 // indirect
 	github.com/pierrec/lz4/v4 v4.1.22 // indirect
-	github.com/pmezard/go-difflib v1.0.1-0.20181226105442-5d4384ee4fb2 // indirect
 	github.com/spaolacci/murmur3 v1.1.0 // indirect
 	github.com/spf13/afero v1.14.0 // indirect
 	github.com/twitchyliquid64/golang-asm v0.15.1 // indirect

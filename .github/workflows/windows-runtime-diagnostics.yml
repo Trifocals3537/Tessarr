@@ -1,0 +1,65 @@
+name: Windows Runtime Diagnostics
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - ".github/workflows/windows-runtime-diagnostics.yml"
+      - "scripts/runtime-gc-probe/**"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-runtime-diagnostics-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  diagnostics:
+    name: Windows manager GC diagnostics
+    runs-on: windows-latest
+    timeout-minutes: 15
+    env:
+      CGO_ENABLED: "0"
+      GOTOOLCHAIN: local
+      GOGC: "20"
+      GOMAXPROCS: "4"
+      GODEBUG: clobberfree=1,gccheckmark=1
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: true
+          cache-dependency-path: go.sum
+
+      - name: Collect toolchain and synthetic lifetime probe
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path diagnostics -Force | Out-Null
+          go version | Set-Content diagnostics/toolchain.txt
+          go env GOOS GOARCH CGO_ENABLED GOVERSION GOEXPERIMENT | Add-Content diagnostics/toolchain.txt
+          go run ./scripts/runtime-gc-probe > diagnostics/toolchain-probe.json
+          exit $LASTEXITCODE
+
+      - name: Stress the repair replay scenario
+        shell: pwsh
+        run: |
+          go test -json -count=50 -timeout=3m -run '^TestRecoveryReplayHonorsFiltersAndHealthOnlyMode$' ./pkg/manager > diagnostics/replay-tests.jsonl 2> diagnostics/replay-stderr.txt
+          exit $LASTEXITCODE
+
+      - name: Run manager suite with pointer and GC checks
+        shell: pwsh
+        run: |
+          go test -json -count=2 -timeout=8m -gcflags=all=-d=checkptr=2 ./pkg/manager > diagnostics/manager-tests.jsonl 2> diagnostics/manager-stderr.txt
+          exit $LASTEXITCODE
+
+      - name: Upload synthetic CI diagnostics
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: windows-runtime-${{ github.sha }}
+          path: diagnostics/
+          if-no-files-found: error
+          retention-days: 7

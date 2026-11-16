@@ -375,3 +375,57 @@ func TestHistoryPruningDoesNotMoveActiveJobProgress(t *testing.T) {
 		t.Fatalf("history bound: %d %v", len(jobs), err)
 	}
 }
+
+func TestRecoveryOwnershipPrecedesCollectionAndUnrelatedRemovalDoesNotWrite(t *testing.T) {
+	h := newFixtureHost(t)
+	root := filepath.Join(t.TempDir(), "recovery")
+	s, err := OpenService(t.Context(), root, h)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	temporary := filepath.Join(root, ".tmp-"+strings.Repeat("a", 32))
+	if err := os.WriteFile(temporary, []byte("in-flight fixture"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if other, err := OpenService(t.Context(), root, h); err == nil {
+		_ = other.Close()
+		t.Fatal("second owner acquired store")
+	}
+	if b, err := os.ReadFile(temporary); err != nil || string(b) != "in-flight fixture" {
+		t.Fatal("failed ownership attempt collected active state")
+	}
+	if err := s.ForgetNZB("unrelated-nzb"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "jobs.json")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("unrelated deletion wrote recovery state: %v", err)
+	}
+}
+
+func TestRecoveryRejectsNonRegularOwnerLock(t *testing.T) {
+	for _, kind := range []string{"directory", "symlink"} {
+		t.Run(kind, func(t *testing.T) {
+			root := t.TempDir()
+			outside := filepath.Join(t.TempDir(), "untouched.lock")
+			if err := os.WriteFile(outside, []byte("untouched"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			lock := filepath.Join(root, ".owner.lock")
+			if kind == "directory" {
+				if err := os.Mkdir(lock, 0o700); err != nil {
+					t.Fatal(err)
+				}
+			} else if err := os.Symlink(outside, lock); err != nil {
+				t.Skipf("symlinks unavailable: %v", err)
+			}
+			if s, err := OpenService(t.Context(), root, newFixtureHost(t)); err == nil {
+				_ = s.Close()
+				t.Fatal("non-regular lock was accepted")
+			}
+			if b, err := os.ReadFile(outside); err != nil || string(b) != "untouched" {
+				t.Fatal("outside lock target changed")
+			}
+		})
+	}
+}

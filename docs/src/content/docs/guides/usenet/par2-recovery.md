@@ -59,7 +59,7 @@ The initial version uses fixed safety limits:
 | Recovery buffer budget | 128 MiB; source maps, application memory, and OS caches also consume memory |
 | Decoded bytes read per job | 64 GiB, including retried body transfers |
 | Download pace / job deadline | 8 MiB/s / six hours, including time paused |
-| Persistent patches | 64 MiB per file; 512 MiB total, plus a bounded temporary object during publication |
+| Persistent patches | 64 MiB and 64 ranges per file; 512 MiB total, plus a bounded temporary object during publication |
 | Saved original NZBs | 128 MiB total |
 | Job history | 32 recent jobs |
 
@@ -72,7 +72,9 @@ Jobs, uploaded sources, and patches live under `usenet/recovery` in Tessarr's
 configuration directory. Back up this directory with the other state: patches
 may become the only surviving copy of recovered data. Successful patches are
 not automatically evicted to make room. Removing an NZB also cancels its
-recovery jobs and removes its saved recovery data.
+recovery jobs and removes its saved source and patch references. Active reads
+finish using their pinned objects before those objects are reclaimed. Recent
+job history can still list the completed or cancelled job.
 
 Interrupted jobs resume after a restart, subject to the original read/deadline
 limits and a maximum of three attempts. Cancelled jobs stay cancelled. A small

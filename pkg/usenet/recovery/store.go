@@ -95,6 +95,12 @@ func OpenStore(path string) (*Store, error) {
 	if err != nil {
 		return nil, err
 	}
+	return loadStore(root, absolute)
+}
+
+// Takes ownership of root. The service acquires its lock through this same
+// handle before loading or collecting any stored state.
+func loadStore(root *os.Root, absolute string) (*Store, error) {
 	s := &Store{root: root, path: absolute, pointers: make(map[string]string), targets: make(map[string]bool), keys: make(map[string]string), ids: make(map[string]string), views: make(map[string]*view)}
 	if err := s.load(); err != nil {
 		_ = root.Close()
@@ -330,12 +336,18 @@ func (s *Store) HasTarget(id, name string) bool {
 }
 
 func validateHeader(h bundleHeader) error {
-	if h.Version != 1 || !digestString(h.Generation, 64) || !digestString(h.Target, 64) || safepath.ValidateIdentifier(h.NZBID) != nil || !digestString(h.Set, 32) || !digestString(h.MD5, 32) || h.Size <= 0 || len(h.Blocks) == 0 || len(h.Blocks) > maxBlocks {
+	if len(h.Blocks) > maxBlocks {
+		return ErrLimit
+	}
+	if h.Version != 1 || !digestString(h.Generation, 64) || !digestString(h.Target, 64) || safepath.ValidateIdentifier(h.NZBID) != nil || !digestString(h.Set, 32) || !digestString(h.MD5, 32) || h.Size <= 0 || len(h.Blocks) == 0 {
 		return errors.New("invalid recovery object header")
 	}
 	end, total := int64(0), int64(0)
 	for _, b := range h.Blocks {
-		if b.Offset < end || b.Length <= 0 || b.Offset > h.Size || b.Length > h.Size-b.Offset || b.Length > MaxPatchBytes-total {
+		if b.Length > MaxPatchBytes-total {
+			return ErrLimit
+		}
+		if b.Offset < end || b.Length <= 0 || b.Offset > h.Size || b.Length > h.Size-b.Offset {
 			return errors.New("invalid recovery block bounds")
 		}
 		end = b.Offset + b.Length

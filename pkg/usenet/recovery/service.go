@@ -4,18 +4,17 @@ import (
 	"context"
 	"errors"
 	"os"
-	"path/filepath"
 	"sort"
 	"sync"
 	"time"
 
+	"github.com/Trifocals3537/tessarr/internal/filelock"
 	"github.com/Trifocals3537/tessarr/internal/nntp"
 	"github.com/Trifocals3537/tessarr/internal/safepath"
-	"github.com/gofrs/flock"
 	"github.com/google/uuid"
 )
 
-var ErrBusy = errors.New("the recovery queue is full")
+var ErrBusy = errors.New("recovery is busy; try again shortly")
 var ErrNotFound = errors.New("recovery job not found")
 var ErrState = errors.New("recovery state could not be saved")
 var ErrUnavailable = errors.New("manual recovery is unavailable; check the application logs")
@@ -46,7 +45,7 @@ type savedJobs struct {
 type Service struct {
 	mu            sync.Mutex
 	store         *Store
-	owner         *flock.Flock
+	owner         *filelock.Lock
 	host          Host
 	jobs          []Job
 	ctx           context.Context
@@ -73,25 +72,20 @@ func NewService(parent context.Context, path string, host Host) (*Service, error
 
 // OpenService lets the owner finish wiring callbacks before saved jobs resume.
 func OpenService(parent context.Context, path string, host Host) (*Service, error) {
-	absolute, err := safepath.EnsureRoot(path, 0o700)
+	root, absolute, err := safepath.EnsureOpenRoot(path, 0o700)
 	if err != nil {
 		return nil, err
 	}
-	lockPath := filepath.Join(absolute, ".owner.lock")
-	if info, e := os.Lstat(lockPath); e == nil && !info.Mode().IsRegular() {
-		return nil, errors.New("invalid recovery owner lock")
-	} else if e != nil && !errors.Is(e, os.ErrNotExist) {
-		return nil, e
-	}
-	owner := flock.New(lockPath)
-	locked, err := owner.TryLock()
+	// Lock the same pinned directory used for all subsequent state access.
+	// Never re-resolve an absolute lock path or clean state before ownership.
+	owner, err := filelock.TryAcquire(root, ".owner.lock", 0o600)
 	if err != nil {
-		return nil, err
+		return nil, errors.Join(err, root.Close())
 	}
-	if !locked {
-		return nil, errors.New("another recovery worker owns this store")
+	if err := safepath.VerifyOpenRoot(root, absolute); err != nil {
+		return nil, errors.Join(err, owner.Unlock(), root.Close())
 	}
-	store, err := OpenStore(absolute)
+	store, err := loadStore(root, absolute)
 	if err != nil {
 		_ = owner.Unlock()
 		return nil, err
@@ -345,6 +339,7 @@ func (s *Service) ForgetNZB(id string) error {
 	defer s.mu.Unlock()
 	previous := append([]Job(nil), s.jobs...)
 	generations := make(map[string]bool)
+	changed := false
 	for i := range s.jobs {
 		j := &s.jobs[i]
 		if j.NZBID != id {
@@ -352,15 +347,30 @@ func (s *Service) ForgetNZB(id string) error {
 		}
 		generations[j.Generation] = true
 		if j.State == "queued" || j.State == "running" {
+			changed = true
 			j.State = "cancelled"
 			j.Stage = "Cancelled"
 			j.Reason = "The NZB was removed."
 			j.FinishedAt = time.Now().UTC()
 		}
 	}
-	if err := s.save(); err != nil {
-		s.jobs = previous
-		return err
+	if changed {
+		if err := s.save(); err != nil {
+			s.jobs = previous
+			return err
+		}
+	}
+	if len(generations) == 0 {
+		owned := false
+		for _, nzbID := range s.store.ids {
+			if nzbID == id {
+				owned = true
+				break
+			}
+		}
+		if !owned {
+			return nil
+		}
 	}
 	if j := s.find(s.runningID); j != nil && j.NZBID == id && s.runningCancel != nil {
 		s.runningCancel()

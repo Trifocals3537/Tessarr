@@ -90,7 +90,7 @@ func TestStoreCrashBeforePointerLeavesNoPublishedData(t *testing.T) {
 }
 
 func TestStoreRejectsCorruptObjectsAndResourceOverflow(t *testing.T) {
-	for _, kind := range []string{"corruption", "overlap", "store limit", "stale fence", "cancelled"} {
+	for _, kind := range []string{"corruption", "overlap", "store limit", "range limit", "stale fence", "cancelled"} {
 		t.Run(kind, func(t *testing.T) {
 			root := filepath.Join(t.TempDir(), "recovery")
 			s, err := OpenStore(root)
@@ -104,6 +104,10 @@ func TestStoreRejectsCorruptObjectsAndResourceOverflow(t *testing.T) {
 			switch kind {
 			case "overlap":
 				blocks = append(blocks, Block{Offset: 3, Data: []byte("x")})
+			case "range limit":
+				for len(blocks) <= maxBlocks {
+					blocks = append(blocks, Block{Offset: int64(len(blocks) + 3), Data: []byte("x")})
+				}
 			case "store limit":
 				f, e := os.Create(filepath.Join(root, "capacity-fixture.patch"))
 				if e != nil {
@@ -125,6 +129,9 @@ func TestStoreRejectsCorruptObjectsAndResourceOverflow(t *testing.T) {
 			if kind != "corruption" {
 				if err == nil {
 					t.Fatal("accepted invalid publication")
+				}
+				if (kind == "store limit" || kind == "range limit") && !errors.Is(err, ErrLimit) {
+					t.Fatalf("resource limit was not reported: %v", err)
 				}
 				if s.Revision(testGeneration) != "" {
 					t.Fatal("published invalid data")

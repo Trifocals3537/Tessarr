@@ -34,7 +34,7 @@ preserved; error text is never used to infer relatedness.
 
 Per NZB, at most 64 failed RAR groups are considered and three hints are emitted.
 A group must have at most 256 volume entries, and both RAR4 and RAR5 boundary inspections
-limits the total parsed member entries to 256. Basenames, volume filenames and
+limit the total parsed member entries to 256. Basenames, volume filenames and
 member names over 512 bytes are skipped rather than truncated into potential
 matches. Only counts, group numbers and fixed descriptions appear in the new
 message. Existing per-group warnings retain their original errors and names.
@@ -43,7 +43,9 @@ This diagnoses the two naming patterns recorded in issue #24, including
 `Demo-Release.part01.rar` beside `Demo - Release.r00` and `Archive.Name.part01.rar`
 beside `Archive Name.r00`. It does not establish common archive identity or
 recoverability, fetch more provider articles, retry, or reconcile groups. The
-pre-existing obfuscated-single-volume grouping heuristic is unchanged. Existing
+previous unconditional one-entry merge has since been replaced by the separate
+[incomplete-volume assembly fallback](rar-archive-grouping.md). That fallback
+does not reconcile the one-entry/fourteen-entry partition shown here. Existing
 header CRC, split-chain, declared-size, segment-geometry and import-availability
 checks still decide admission. A genuinely incomplete set continues to reject.
 

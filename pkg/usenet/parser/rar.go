@@ -371,6 +371,17 @@ func (p *RARParser) parseArchive(ctx context.Context, volumes []*types.Volume, p
 		}
 		fileCount += len(result.files)
 	}
+	singleRAR5Incomplete := version == RARVersion5 && len(results) == 1 && results[0].volumeInfo != nil &&
+		results[0].volumeInfo.multi && (results[0].volumeInfo.number > 0 || results[0].volumeInfo.next)
+	// A metadata/service-only volume may be necessary to complete the RAR5
+	// index sequence even though it contributes no logical member bytes.
+	if fileCount == 0 && singleRAR5Incomplete {
+		cause := fmt.Errorf("no files found in any RAR volume")
+		if isHeaderEncrypted {
+			cause = fmt.Errorf("RAR archive has encrypted headers; password required or incorrect")
+		}
+		return nil, &rarIncompleteVolumeError{cause: cause, version: RARVersion5}
+	}
 
 	// If headers are encrypted, we can't list files without password
 	if isHeaderEncrypted && fileCount == 0 {
@@ -407,7 +418,11 @@ func (p *RARParser) parseArchive(ctx context.Context, volumes []*types.Volume, p
 			for i, result := range results {
 				members[i] = result.files
 			}
-			return nil, rar5GroupBoundaryFailure(err, infos, members)
+			groupErr := rar5GroupBoundaryFailure(err, infos, members)
+			if singleRAR5Incomplete {
+				return nil, &rarIncompleteVolumeError{cause: groupErr, version: RARVersion5}
+			}
+			return nil, groupErr
 		}
 	}
 	var allRawFiles []*RARFileEntry
@@ -442,7 +457,11 @@ func (p *RARParser) parseArchive(ctx context.Context, volumes []*types.Volume, p
 				for i, result := range results {
 					members[i] = result.files
 				}
-				return nil, rar4GroupBoundaryFailure(boundary, members)
+				groupErr := rar4GroupBoundaryFailure(boundary, members)
+				if len(results) == 1 {
+					return nil, &rarIncompleteVolumeError{cause: groupErr, version: RARVersion4}
+				}
+				return nil, groupErr
 			}
 			// Complete RAR5 index/end metadata contradicts a missing member
 			// boundary. Only its earlier incomplete-index path supplies hints.

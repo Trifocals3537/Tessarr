@@ -16,7 +16,7 @@ func (u *Usenet) recoveredArticle(file *storage.NZBFile) func(context.Context, r
 	}
 	gen, size, store := recovery.Generation(*file), file.Size, u.recovery.Store()
 	return func(ctx context.Context, seg reader.SegmentMeta, w io.Writer) (bool, error) {
-		if seg.SegmentDataStart != 0 || !store.Covers(gen, seg.StartOffset, seg.Bytes) {
+		if seg.SegmentDataStart != 0 || !store.CoversContext(ctx, gen, seg.StartOffset, seg.Bytes) {
 			return false, nil
 		}
 		buffer := make([]byte, min(seg.Bytes, int64(64<<10)))

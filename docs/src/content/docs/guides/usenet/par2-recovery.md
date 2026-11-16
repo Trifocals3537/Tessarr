@@ -35,7 +35,9 @@ do not start it automatically.
 This first version supports completed, existing plain-file NZBs with complete
 saved article maps. PAR2 files must be named with a `.par2` extension in the
 original NZB. Other files required by the same recovery set must also be listed
-in that NZB and resolvable by their original names.
+in that NZB and resolvable by their original names. A completely missing
+companion can participate in recovery using its verified PAR2 size and slice
+checksums; temporary provider failures still stop the job.
 
 Archived members, encrypted files, merged multipart media layouts, new imports
 awaiting admission, oversized recovery sets, and ambiguous layouts are rejected
@@ -56,6 +58,7 @@ The initial version uses fixed safety limits:
 | Recovery set | 32 GiB; 256 recoverable files; 32,768 input slices |
 | Recovery slice / decoded article | 8 MiB / 4 MiB |
 | Recovery rows | Up to 16, reduced when needed to fit the buffer budget |
+| Search after damaged PAR2 packet headers | 32 MiB across the job; missing article spans count toward this limit |
 | Recovery buffer budget | 128 MiB; source maps, application memory, and OS caches also consume memory |
 | Decoded bytes read per job | 64 GiB, including retried body transfers |
 | Download pace / job deadline | 8 MiB/s / six hours, including time paused |

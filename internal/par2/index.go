@@ -21,6 +21,7 @@ const (
 	MaxFiles         = 256
 	maxMetadataBytes = 8 << 20
 	maxPacketCount   = 65536
+	maxResyncBytes   = 32 << 20
 )
 
 var magic = [8]byte{'P', 'A', 'R', '2', 0, 'P', 'K', 'T'}
@@ -34,6 +35,9 @@ type Source struct {
 	Size    int64
 	Reader  io.ReaderAt
 	Missing func(error) bool
+	// SkipMissing returns the end of the confirmed missing article at offset.
+	// It avoids repeatedly requesting the same absent article during scanning.
+	SkipMissing func(int64) int64
 }
 
 var ErrIntegrity = errors.New("PAR2 payload failed integrity verification")
@@ -41,6 +45,58 @@ var ErrLimit = errors.New("PAR2 dimensions exceed recovery limits")
 
 func skippable(source Source, err error) bool {
 	return errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) || (source.Missing != nil && source.Missing(err))
+}
+
+// resync looks for the next aligned packet magic with one bounded window.
+// The shared search budget includes skipped unavailable spans as well as data.
+func resync(ctx context.Context, source Source, off int64, budget *int64) (int64, bool, error) {
+	buffer := make([]byte, 64<<10+7)
+	for off <= source.Size-64 {
+		if err := ctx.Err(); err != nil {
+			return 0, false, err
+		}
+		if *budget <= 0 {
+			return 0, false, fmt.Errorf("%w: packet resynchronization", ErrLimit)
+		}
+		want := min(int64(len(buffer)), source.Size-off, *budget+7)
+		n, err := source.Reader.ReadAt(buffer[:want], off)
+		if n < 0 || int64(n) > want {
+			return 0, false, errors.New("invalid PAR2 scan read count")
+		}
+		for start := 0; start+8 <= n; {
+			i := bytes.Index(buffer[start:n], magic[:])
+			if i < 0 {
+				break
+			}
+			i += start
+			if (off+int64(i))%4 == 0 {
+				*budget -= int64(i)
+				return off + int64(i), true, nil
+			}
+			start = i + 1
+		}
+		advance := max(int64(n)-7, int64(1))
+		if err != nil {
+			if !skippable(source, err) {
+				return 0, false, err
+			}
+			if source.Missing != nil && source.Missing(err) {
+				if source.SkipMissing != nil {
+					advance = max(advance, source.SkipMissing(off+int64(n))-off)
+				} else {
+					advance = max(advance, int64(4096))
+				}
+			} else {
+				return 0, false, nil
+			}
+		}
+		if advance > *budget {
+			return 0, false, fmt.Errorf("%w: packet resynchronization", ErrLimit)
+		}
+		*budget -= advance
+		off += advance
+	}
+	return 0, false, nil
 }
 
 type Check struct {
@@ -91,6 +147,7 @@ func ReadIndexNames(ctx context.Context, sources []Source, targets []string, siz
 	sets := make(map[[16]byte]*builder)
 	seenMetadata := make(map[[16]byte]bool)
 	metadata, packets := 0, 0
+	resyncBudget := int64(maxResyncBytes)
 	for si, source := range sources {
 		for off := int64(0); off <= source.Size-64; {
 			if err := ctx.Err(); err != nil {
@@ -101,18 +158,30 @@ func ReadIndexNames(ctx context.Context, sources []Source, targets []string, siz
 				return nil, fmt.Errorf("%w: packet count", ErrLimit)
 			}
 			var header [64]byte
-			if _, err := source.Reader.ReadAt(header[:], off); err != nil {
-				if !skippable(source, err) {
-					return nil, err
-				}
-				break
-			}
-			if [8]byte(header[:8]) != magic {
-				break
+			n, readErr := source.Reader.ReadAt(header[:], off)
+			if readErr != nil && !skippable(source, readErr) {
+				return nil, readErr
 			}
 			length := binary.LittleEndian.Uint64(header[8:16])
-			if length < 64 || length%4 != 0 || length > uint64(MaxSliceBytes+68) || length > uint64(source.Size-off) {
-				break
+			if readErr != nil || n != len(header) || [8]byte(header[:8]) != magic || length < 64 || length%4 != 0 || length > uint64(MaxSliceBytes+68) || length > uint64(source.Size-off) {
+				start := off + 4
+				if readErr != nil && source.Missing != nil && source.Missing(readErr) && source.SkipMissing != nil {
+					start = max(start, source.SkipMissing(off+int64(n)))
+				}
+				// Charge a skipped missing header/article before the scan begins.
+				if start-off > resyncBudget {
+					return nil, ErrLimit
+				}
+				resyncBudget -= start - off
+				next, found, err := resync(ctx, source, start, &resyncBudget)
+				if err != nil {
+					return nil, err
+				}
+				if !found {
+					break
+				}
+				off = next
+				continue
 			}
 			set, kind := [16]byte(header[32:48]), [16]byte(header[48:64])
 			b := sets[set]

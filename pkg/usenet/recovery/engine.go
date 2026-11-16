@@ -88,12 +88,13 @@ type article struct {
 	geometry storage.NZBArticleGeometry
 }
 type remoteFile struct {
-	name       string
-	size       int64
-	articles   []article
-	cache      *articleCache
-	generation string
-	store      *Store
+	name        string
+	size        int64
+	articles    []article
+	cache       *articleCache
+	generation  string
+	store       *Store
+	unavailable bool
 }
 type articleCache struct {
 	ctx     context.Context
@@ -141,6 +142,14 @@ func (f *remoteFile) ReadAt(p []byte, off int64) (int, error) {
 	return f.readAt(f.cache.ctx, p, off)
 }
 
+func (f *remoteFile) skipMissing(off int64) int64 {
+	i := sort.Search(len(f.articles), func(i int) bool { return f.articles[i].geometry.Offset+f.articles[i].geometry.Bytes > off })
+	if i < len(f.articles) {
+		return f.articles[i].geometry.Offset + f.articles[i].geometry.Bytes
+	}
+	return f.size
+}
+
 func (f *remoteFile) readAt(ctx context.Context, p []byte, off int64) (int, error) {
 	if len(p) == 0 {
 		return 0, nil
@@ -150,6 +159,9 @@ func (f *remoteFile) readAt(ctx context.Context, p []byte, off int64) (int, erro
 	}
 	if off >= f.size {
 		return 0, io.EOF
+	}
+	if f.unavailable {
+		return 0, &nntp.Error{Type: nntp.ErrorTypeArticleNotFound, Message: "recovery companion is absent on all providers"}
 	}
 	want := min(int64(len(p)), f.size-off)
 	done := int64(0)
@@ -282,7 +294,7 @@ func discoverFile(raw nzbparser.NzbFile, cache *articleCache) (*remoteFile, erro
 	if err != nil {
 		return nil, err
 	}
-	for i := 0; i < min(len(ids), 16); i++ {
+	for i := 0; i < len(ids); i++ {
 		_, m, err := cache.get(ids[i], nil)
 		if err != nil {
 			if nntp.IsArticleNotFoundError(err) {
@@ -307,7 +319,7 @@ func discoverFile(raw nzbparser.NzbFile, cache *articleCache) (*remoteFile, erro
 		}
 		return f, nil
 	}
-	return nil, ErrParity
+	return nil, &nntp.Error{Type: nntp.ErrorTypeArticleNotFound, Message: "all source articles are absent"}
 }
 
 type progress func(stage string, readBytes int64) error
@@ -403,7 +415,7 @@ func Run(ctx context.Context, target Target, host Host, store *Store, alreadyRea
 			}
 			return e
 		}
-		sources = append(sources, par2.Source{Name: f.Filename, Size: remote.size, Reader: remote, Missing: nntp.IsArticleNotFoundError})
+		sources = append(sources, par2.Source{Name: f.Filename, Size: remote.size, Reader: remote, Missing: nntp.IsArticleNotFoundError, SkipMissing: remote.skipMissing})
 	}
 	idx, err := par2.ReadIndexNames(ctx, sources, []string{sourceTarget.Filename, target.File.Name}, target.File.Size)
 	if err != nil {
@@ -447,6 +459,12 @@ func Run(ctx context.Context, target Target, host Host, store *Store, alreadyRea
 		}
 		if remote == nil {
 			remote, err = discoverFile(matches[0], cache)
+			if nntp.IsArticleNotFoundError(err) {
+				// PAR2 supplies the verified size and slice checksums; no yEnc
+				// geometry is needed to account for a wholly absent companion.
+				remote = &remoteFile{name: f.Name, size: f.Size, cache: cache, unavailable: true}
+				err = nil
+			}
 		}
 		if err != nil {
 			return err

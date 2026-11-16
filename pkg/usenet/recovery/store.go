@@ -15,6 +15,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/Trifocals3537/tessarr/internal/safepath"
 	"github.com/google/uuid"
@@ -356,53 +357,69 @@ func validateHeader(h bundleHeader) error {
 	return nil
 }
 
-func (s *Store) open(gen string) (*view, func(), error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.closed {
-		return nil, nil, errors.New("recovery store closed")
-	}
-	name, ok := s.pointers[gen]
-	if !ok {
-		return nil, func() {}, nil
-	}
-	v := s.views[name]
-	if v == nil {
-		var err error
-		v, err = s.verifyObject(name, gen)
-		if err != nil {
+func (s *Store) open(ctx context.Context, gen string) (*view, func(), error) {
+	for {
+		if err := ctx.Err(); err != nil {
 			return nil, nil, err
 		}
-		if v.header.Target != s.keys[gen] || v.header.NZBID != s.ids[gen] {
-			_ = v.file.Close()
-			return nil, nil, errors.New("recovery pointer identity mismatch")
+		s.mu.Lock()
+		if s.closed {
+			s.mu.Unlock()
+			return nil, nil, errors.New("recovery store closed")
 		}
-		// A small FD-only cache. Bytes are never accumulated in process memory.
-		if len(s.views) >= 8 {
-			for key, old := range s.views {
-				if old.refs == 0 {
-					_ = old.file.Close()
-					delete(s.views, key)
-					break
+		name, ok := s.pointers[gen]
+		if !ok {
+			s.mu.Unlock()
+			return nil, func() {}, nil
+		}
+		v := s.views[name]
+		if v == nil {
+			// A small FD-only cache. Bytes are never accumulated in process memory.
+			if len(s.views) >= 8 {
+				for key, old := range s.views {
+					if old.refs == 0 {
+						_ = old.file.Close()
+						delete(s.views, key)
+						break
+					}
+				}
+				if len(s.views) >= 8 {
+					s.mu.Unlock()
+					timer := time.NewTimer(25 * time.Millisecond)
+					select {
+					case <-ctx.Done():
+						timer.Stop()
+						return nil, nil, ctx.Err()
+					case <-timer.C:
+					}
+					continue
 				}
 			}
-			if len(s.views) >= 8 {
-				_ = v.file.Close()
-				return nil, nil, errors.New("too many concurrent recovery readers")
+			var err error
+			v, err = s.verifyObject(name, gen)
+			if err != nil {
+				s.mu.Unlock()
+				return nil, nil, err
 			}
+			if v.header.Target != s.keys[gen] || v.header.NZBID != s.ids[gen] {
+				_ = v.file.Close()
+				s.mu.Unlock()
+				return nil, nil, errors.New("recovery pointer identity mismatch")
+			}
+			s.views[name] = v
 		}
-		s.views[name] = v
+		v.refs++
+		s.mu.Unlock()
+		return v, func() {
+			s.mu.Lock()
+			defer s.mu.Unlock()
+			v.refs--
+			if v.refs == 0 && (v.retired || s.closed) {
+				_ = v.file.Close()
+				delete(s.views, v.object)
+			}
+		}, nil
 	}
-	v.refs++
-	return v, func() {
-		s.mu.Lock()
-		defer s.mu.Unlock()
-		v.refs--
-		if v.refs == 0 && (v.retired || s.closed) {
-			_ = v.file.Close()
-			delete(s.views, v.object)
-		}
-	}, nil
 }
 
 func (s *Store) verifyObject(name, gen string) (_ *view, resultErr error) {
@@ -477,7 +494,7 @@ func (s *Store) Overlay(ctx context.Context, gen string, size int64, p []byte, o
 	if off >= size {
 		return 0, io.EOF
 	}
-	v, release, err := s.open(gen)
+	v, release, err := s.open(ctx, gen)
 	if err != nil {
 		return 0, err
 	}
@@ -534,7 +551,11 @@ func (s *Store) Overlay(ctx context.Context, gen string, size int64, p []byte, o
 }
 
 func (s *Store) Covers(gen string, offset, length int64) bool {
-	v, release, err := s.open(gen)
+	return s.CoversContext(context.Background(), gen, offset, length)
+}
+
+func (s *Store) CoversContext(ctx context.Context, gen string, offset, length int64) bool {
+	v, release, err := s.open(ctx, gen)
 	if err != nil || v == nil {
 		return false
 	}
@@ -565,7 +586,7 @@ func (s *Store) Publish(ctx context.Context, gen string, size int64, set, md5sum
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	old, release, err := s.open(gen)
+	old, release, err := s.open(ctx, gen)
 	if err != nil {
 		return err
 	}

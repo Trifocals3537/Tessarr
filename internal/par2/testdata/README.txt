@@ -6,3 +6,11 @@ independent of Tessarr's parser and finite-field implementation.
 Source: kipsilabs/altmount, commit 9260b9f97dfe340e38911d15d04c234b2675be73,
 internal/importer/parser/par2/testdata/realtool. Used under the accompanying
 MIT license. No runtime code from AltMount is included.
+
+The additional wide*.par2 files encode the same two data files with 1024-byte
+slices and eight recovery rows. They were generated independently using
+github.com/javi11/gopar-turbo/par2 at commit
+9c0f5ca75042521c59c0f440ee8c082cae233995 (v0.4.0):
+par2.Create("wide.par2", []string{"fileA.bin", "fileB.bin"},
+  par2.CreateOptions{SliceByteCount:1024, NumParityShards:8, NumGoroutines:1})
+No reference encoder code is included or needed to run the tests.

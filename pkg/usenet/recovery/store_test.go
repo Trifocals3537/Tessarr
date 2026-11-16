@@ -4,11 +4,13 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 var testGeneration = strings.Repeat("a", 64)
@@ -164,5 +166,74 @@ func TestStoreRejectsCorruptObjectsAndResourceOverflow(t *testing.T) {
 				t.Fatal("corrupt patch was served or silently bypassed")
 			}
 		})
+	}
+}
+
+func TestNinthConcurrentRepairedReaderWaitsAndHonorsCancellation(t *testing.T) {
+	s := newTestStore(t)
+	gens := make([]string, 9)
+	for i := range gens {
+		gens[i] = fmt.Sprintf("%064x", i+1)
+		if err := s.Publish(t.Context(), gens[i], 10, testSet, testMD5, []Block{{Offset: 2, Data: []byte("2")}}, nil, Identity{NZBID: fmt.Sprintf("fixture-%d", i), File: "example.mkv"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	entered := make(chan struct{}, 8)
+	release := make(chan struct{})
+	finished := make(chan error, 8)
+	base := func(ctx context.Context, p []byte, off int64) (int, error) {
+		entered <- struct{}{}
+		select {
+		case <-release:
+		case <-ctx.Done():
+			return 0, ctx.Err()
+		}
+		return bytes.NewReader([]byte("0123456789")).ReadAt(p, off)
+	}
+	for i := 0; i < 8; i++ {
+		go func(gen string) { _, err := s.Overlay(t.Context(), gen, 10, make([]byte, 2), 0, base); finished <- err }(gens[i])
+	}
+	defer func() {
+		select {
+		case <-release:
+		default:
+			close(release)
+		}
+	}()
+	for range 8 {
+		select {
+		case <-entered:
+		case <-time.After(3 * time.Second):
+			t.Fatal("readers did not hold cache views")
+		}
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 50*time.Millisecond)
+	_, err := s.Overlay(ctx, gens[8], 10, make([]byte, 1), 2, base)
+	cancel()
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("saturated cache returned a file failure: %v", err)
+	}
+	ninth := make(chan error, 1)
+	go func() {
+		p := make([]byte, 1)
+		n, err := s.Overlay(t.Context(), gens[8], 10, p, 2, base)
+		if err == nil && (n != 1 || string(p) != "2") {
+			err = errors.New("ninth stream returned wrong patch")
+		}
+		ninth <- err
+	}()
+	close(release)
+	for range 8 {
+		if err := <-finished; err != nil {
+			t.Fatal(err)
+		}
+	}
+	select {
+	case err := <-ninth:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("ninth stream did not resume")
 	}
 }

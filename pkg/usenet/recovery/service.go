@@ -214,6 +214,15 @@ func (s *Service) Start(ctx context.Context, id, file string, original []byte) (
 	}
 	s.store.mu.Lock()
 	defer s.store.mu.Unlock()
+	// A target may have been removed or replaced while its upload was parsed.
+	// Removal holds this same lock through metadata deletion.
+	current, err := s.host.Snapshot(ctx, id, file)
+	if err != nil {
+		return Job{}, err
+	}
+	if current.Generation != target.Generation {
+		return Job{}, ErrStale
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.ctx.Err() != nil || s.fatal != nil {
@@ -333,8 +342,24 @@ func safeReason(err error) string {
 }
 
 func (s *Service) ForgetNZB(id string) error {
+	return s.RemoveNZB(id, nil)
+}
+
+// RemoveNZB fences admissions and publication through the caller's metadata
+// removal. Snapshot is rechecked under this lock before an upload is saved.
+func (s *Service) RemoveNZB(id string, remove func() error) error {
 	s.store.mu.Lock()
 	defer s.store.mu.Unlock()
+	if err := s.forgetNZBLocked(id); err != nil {
+		return err
+	}
+	if remove != nil {
+		return remove()
+	}
+	return nil
+}
+
+func (s *Service) forgetNZBLocked(id string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	previous := append([]Job(nil), s.jobs...)

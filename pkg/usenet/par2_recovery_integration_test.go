@@ -9,6 +9,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"hash/crc32"
 	"io"
@@ -106,6 +107,8 @@ func TestManualPAR2NNTPHelper(t *testing.T) {
 		}
 	}
 	source.WriteString("</nzb>")
+	articles["abort@fixture.invalid"] = recoveryWireArticle{data: bytes.Repeat([]byte("synthetic interrupted article"), 10000), name: "abort.bin", size: len("synthetic interrupted article") * 10000, begin: 1, part: 1, total: 1}
+	abortedClosed := make(chan struct{}, 1)
 	var mu sync.Mutex
 	var workers sync.WaitGroup
 	acceptDone := make(chan struct{})
@@ -120,6 +123,15 @@ func TestManualPAR2NNTPHelper(t *testing.T) {
 			go func() {
 				defer workers.Done()
 				defer conn.Close()
+				didAbort := false
+				defer func() {
+					if didAbort {
+						select {
+						case abortedClosed <- struct{}{}:
+						default:
+						}
+					}
+				}()
 				_ = conn.SetDeadline(time.Now().Add(20 * time.Second))
 				p := textproto.NewConn(conn)
 				_ = p.PrintfLine("200 synthetic fixture ready")
@@ -146,6 +158,9 @@ func TestManualPAR2NNTPHelper(t *testing.T) {
 					case "DATE":
 						_ = p.PrintfLine("111 20261116000000")
 					case "STAT", "BODY", "ARTICLE":
+						if arg == "abort@fixture.invalid" {
+							didAbort = true
+						}
 						mu.Lock()
 						article, exists := articles[arg]
 						absent := missing[arg]
@@ -203,6 +218,21 @@ func TestManualPAR2NNTPHelper(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Second)
 	defer cancel()
+	// A writer may stop while the response body still has unread bytes. It
+	// must never return that connection to the shared playback pool.
+	_, _, err = (recoveryHost{u: u}).Download(ctx, "abort@fixture.invalid", nil, func(int) error { return recovery.ErrLimit })
+	if !errors.Is(err, recovery.ErrLimit) {
+		t.Fatalf("interrupted transfer result: %v", err)
+	}
+	select {
+	case <-abortedClosed:
+	case <-time.After(2 * time.Second):
+		t.Fatal("interrupted body connection remained pooled")
+	}
+	payload, _, err := (recoveryHost{u: u}).Download(ctx, "fileA.bin-8@fixture.invalid", nil, func(int) error { return nil })
+	if err != nil || !bytes.Equal(payload, expected[4096:4608]) {
+		t.Fatalf("shared pool was not usable after interrupted body: %v", err)
+	}
 	if err := u.Stream(ctx, id, "fileA.bin", 0, 511, io.Discard); err == nil {
 		t.Fatal("missing bytes unexpectedly streamed before repair")
 	}

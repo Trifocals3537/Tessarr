@@ -33,11 +33,15 @@ type fixtureHost struct {
 }
 
 func newFixtureHost(t *testing.T) *fixtureHost {
+	return fixtureHostWithParity(t, []string{"realtool.par2", "realtool.vol0+4.par2"})
+}
+
+func fixtureHostWithParity(t *testing.T, parity []string) *fixtureHost {
 	t.Helper()
 	h := &fixtureHost{articles: make(map[string]fixtureArticle), fail: make(map[string]error)}
 	var source strings.Builder
 	source.WriteString("<nzb>")
-	for _, name := range []string{"fileA.bin", "fileB.bin", "realtool.par2", "realtool.vol0+4.par2"} {
+	for _, name := range append([]string{"fileA.bin", "fileB.bin"}, parity...) {
 		data, err := os.ReadFile(filepath.Join("..", "..", "..", "internal", "par2", "testdata", name))
 		if err != nil {
 			t.Fatal(err)
@@ -274,6 +278,72 @@ func TestRecoveryCancellationDoesNotPublish(t *testing.T) {
 	}
 	if s.Revision(h.target.Generation) != "" {
 		t.Fatal("cancelled work published")
+	}
+}
+
+func TestRecoveryResynchronizesAfterMissingParityHeader(t *testing.T) {
+	for _, kind := range []string{"missing", "corrupt", "temporary"} {
+		t.Run(kind, func(t *testing.T) {
+			h := newFixtureHost(t)
+			s := newTestStore(t)
+			h.fail["fileA.bin-0@fixture.invalid"] = missingArticle()
+			id := "realtool.vol0+4.par2-0@fixture.invalid"
+			switch kind {
+			case "missing":
+				h.fail[id] = missingArticle()
+			case "corrupt":
+				a := h.articles[id]
+				a.data[0] ^= 1
+				h.articles[id] = a
+			case "temporary":
+				h.fail[id] = &nntp.Error{Type: nntp.ErrorTypeTimeout, Message: "synthetic timeout"}
+			}
+			err := Run(t.Context(), h.target, h, s, 0, nil)
+			if kind == "temporary" {
+				if err == nil || safeReason(err) != ErrTemporary.Error() || s.Revision(h.target.Generation) != "" {
+					t.Fatalf("temporary parity failure misclassified: %v", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !s.Covers(h.target.Generation, 0, 512) {
+				t.Fatal("intact later parity packets were not used")
+			}
+		})
+	}
+}
+
+func TestRecoveryReconstructsWhollyMissingUnmappedCompanion(t *testing.T) {
+	for _, temporary := range []bool{false, true} {
+		t.Run(fmt.Sprint(temporary), func(t *testing.T) {
+			h := fixtureHostWithParity(t, []string{"wide.par2", "wide.vol00+01.par2", "wide.vol01+02.par2", "wide.vol03+04.par2", "wide.vol07+01.par2"})
+			s := newTestStore(t)
+			h.target.Files = h.target.Files[:1] // No saved map for the companion.
+			h.fail["fileA.bin-0@fixture.invalid"] = missingArticle()
+			for id := range h.articles {
+				if strings.HasPrefix(id, "fileB.bin") {
+					h.fail[id] = missingArticle()
+				}
+			}
+			if temporary {
+				h.fail["fileB.bin-7@fixture.invalid"] = &nntp.Error{Type: nntp.ErrorTypeTimeout, Message: "synthetic timeout"}
+			}
+			err := Run(t.Context(), h.target, h, s, 0, nil)
+			if temporary {
+				if err == nil || safeReason(err) != ErrTemporary.Error() || s.Revision(h.target.Generation) != "" {
+					t.Fatalf("temporary companion failure misclassified: %v", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !s.Covers(h.target.Generation, 0, 512) {
+				t.Fatal("missing companion prevented target recovery")
+			}
+		})
 	}
 }
 

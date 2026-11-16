@@ -806,13 +806,13 @@ func (u *Usenet) CheckFile(ctx context.Context, nzoID, filename string) error {
 		if e != nil {
 			return e
 		}
-		messageIDs = u.unpatchedSamples(nzoID, file, messageIDs)
+		messageIDs = u.unpatchedSamples(ctx, nzoID, file, messageIDs)
 	}
 	return u.checkAvailabilityMode(ctx, filename, messageIDs, true)
 }
 
 func (u *Usenet) CheckFileAvailability(ctx context.Context, file *storage.NZBFile, samplePercent int) error {
-	return u.checkAvailability(ctx, file.Name, u.unpatchedSamples(file.NzbID, file, u.sampleSegments(file.Segments, samplePercent)))
+	return u.checkAvailability(ctx, file.Name, u.unpatchedSamples(ctx, file.NzbID, file, u.sampleSegments(file.Segments, samplePercent)))
 }
 
 // checkAvailability batch-STATs the given sampled message ids. The NNTP client
@@ -1493,39 +1493,40 @@ func (u *Usenet) Delete(nzoID string) error {
 	if err != nil {
 		return fmt.Errorf("refusing unsafe persisted NZB path: %w", err)
 	}
-	if u.recovery != nil {
-		if err := u.recovery.ForgetNZB(nzoID); err != nil {
-			return fmt.Errorf("remove NZB recovery state: %w", err)
+	remove := func() error {
+		if sourcePath != "" {
+			processingPath, pathErr := metadataFilePath(u.metadataDir, nzoID, nzbProcessingSuffix)
+			if pathErr != nil {
+				return pathErr
+			}
+			processedPath, pathErr := metadataFilePath(u.metadataDir, nzoID, nzbProcessedSuffix)
+			if pathErr != nil {
+				return pathErr
+			}
+			failedPath, pathErr := metadataFilePath(u.metadataDir, nzoID, nzbFailedSuffix)
+			if pathErr != nil {
+				return pathErr
+			}
+			if err := errors.Join(
+				removeMetadataFileIfExists(u.metadataDir, sourcePath),
+				removeMetadataFileIfExists(u.metadataDir, processingPath),
+				removeMetadataFileIfExists(u.metadataDir, processedPath),
+				removeMetadataFileIfExists(u.metadataDir, failedPath),
+			); err != nil {
+				return fmt.Errorf("remove NZB source artifacts: %w", err)
+			}
 		}
-	}
-	if sourcePath != "" {
-		processingPath, pathErr := metadataFilePath(u.metadataDir, nzoID, nzbProcessingSuffix)
-		if pathErr != nil {
-			return pathErr
-		}
-		processedPath, pathErr := metadataFilePath(u.metadataDir, nzoID, nzbProcessedSuffix)
-		if pathErr != nil {
-			return pathErr
-		}
-		failedPath, pathErr := metadataFilePath(u.metadataDir, nzoID, nzbFailedSuffix)
-		if pathErr != nil {
-			return pathErr
-		}
-		if err := errors.Join(
-			removeMetadataFileIfExists(u.metadataDir, sourcePath),
-			removeMetadataFileIfExists(u.metadataDir, processingPath),
-			removeMetadataFileIfExists(u.metadataDir, processedPath),
-			removeMetadataFileIfExists(u.metadataDir, failedPath),
-		); err != nil {
-			return fmt.Errorf("remove NZB source artifacts: %w", err)
-		}
-	}
 
-	// Delete from file-based storage
-	if err := u.nzbStorage.DeleteNZB(nzoID); err != nil {
-		return fmt.Errorf("failed to delete NZB from storage: %w", err)
+		// Delete from file-based storage
+		if err := u.nzbStorage.DeleteNZB(nzoID); err != nil {
+			return fmt.Errorf("failed to delete NZB from storage: %w", err)
+		}
+		return nil
 	}
-	return nil
+	if u.recovery != nil {
+		return u.recovery.RemoveNZB(nzoID, remove)
+	}
+	return remove()
 }
 
 // PendingNZB is an unmanaged NZB file claimed by the metadata-directory watcher.

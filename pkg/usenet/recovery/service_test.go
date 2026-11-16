@@ -8,6 +8,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -427,5 +429,66 @@ func TestRecoveryRejectsNonRegularOwnerLock(t *testing.T) {
 				t.Fatal("outside lock target changed")
 			}
 		})
+	}
+}
+
+type admissionGateHost struct {
+	Host
+	once              sync.Once
+	captured, release chan struct{}
+	removed           atomic.Bool
+}
+
+func (h *admissionGateHost) Snapshot(ctx context.Context, id, name string) (Target, error) {
+	if h.removed.Load() {
+		return Target{}, ErrStale
+	}
+	target, err := h.Host.Snapshot(ctx, id, name)
+	h.once.Do(func() {
+		close(h.captured)
+		select {
+		case <-h.release:
+		case <-ctx.Done():
+		}
+	})
+	return target, err
+}
+
+func TestRemovalFencesAdmissionThatAlreadyCapturedTarget(t *testing.T) {
+	fixture := newFixtureHost(t)
+	h := &admissionGateHost{Host: fixture, captured: make(chan struct{}), release: make(chan struct{})}
+	s, err := OpenService(t.Context(), filepath.Join(t.TempDir(), "recovery"), h)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	result := make(chan error, 1)
+	go func() {
+		_, err := s.Start(t.Context(), fixture.target.ID, fixture.target.File.Name, nil)
+		result <- err
+	}()
+	select {
+	case <-h.captured:
+	case <-time.After(3 * time.Second):
+		t.Fatal("admission did not capture target")
+	}
+	if err := s.RemoveNZB(fixture.target.ID, func() error { h.removed.Store(true); return nil }); err != nil {
+		t.Fatal(err)
+	}
+	close(h.release)
+	select {
+	case err := <-result:
+		if !errors.Is(err, ErrStale) {
+			t.Fatalf("stale admission survived removal: %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("admission did not finish")
+	}
+	jobs, err := s.Jobs()
+	if err != nil || len(jobs) != 0 {
+		t.Fatalf("removed target left queued work: %+v %v", jobs, err)
+	}
+	if _, err := s.Store().ReadSource(fixture.target.Generation); !errors.Is(err, ErrSourceRequired) {
+		t.Fatalf("removed target retained uploaded source: %v", err)
 	}
 }

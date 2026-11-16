@@ -83,6 +83,11 @@ func (h recoveryHost) Download(ctx context.Context, id string, expected *storage
 		buffer := &recoveryBuffer{ctx: ctx, consume: consume}
 		n, meta, err := conn.StreamBodyWithMetadata(id, buffer)
 		if err != nil {
+			// A stopped writer or decoder can leave part of the body unread.
+			// Only a complete article-not-found response is safe to reuse.
+			if !nntp.IsArticleNotFoundError(err) {
+				_ = conn.Close()
+			}
 			if ctx.Err() != nil {
 				return ctx.Err()
 			}
@@ -243,7 +248,7 @@ func (r *recoveredReader) Prefetch(ctx context.Context, off, length int64) {
 	r.base.Prefetch(ctx, off, length)
 }
 
-func (u *Usenet) unpatchedSamples(id string, file *storage.NZBFile, samples []string) []string {
+func (u *Usenet) unpatchedSamples(ctx context.Context, id string, file *storage.NZBFile, samples []string) []string {
 	if u.recovery == nil {
 		return samples
 	}
@@ -255,7 +260,7 @@ func (u *Usenet) unpatchedSamples(id string, file *storage.NZBFile, samples []st
 	}
 	covered := make(map[string]bool)
 	for _, s := range file.Segments {
-		if u.recovery.Store().Covers(gen, s.StartOffset, s.Bytes) {
+		if u.recovery.Store().CoversContext(ctx, gen, s.StartOffset, s.Bytes) {
 			covered[s.MessageID] = true
 		}
 	}

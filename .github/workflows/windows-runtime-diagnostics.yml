@@ -44,12 +44,14 @@ jobs:
           exit $LASTEXITCODE
 
       - name: Stress the repair replay scenario
+        if: ${{ !cancelled() }}
         shell: pwsh
         run: |
           go test -json -count=50 -timeout=3m -run '^TestRecoveryReplayHonorsFiltersAndHealthOnlyMode$' ./pkg/manager > diagnostics/replay-tests.jsonl 2> diagnostics/replay-stderr.txt
           exit $LASTEXITCODE
 
       - name: Run manager suite with pointer and GC checks
+        if: ${{ !cancelled() }}
         shell: pwsh
         run: |
           go test -json -count=2 -timeout=8m -gcflags=all=-d=checkptr=2 ./pkg/manager > diagnostics/manager-tests.jsonl 2> diagnostics/manager-stderr.txt

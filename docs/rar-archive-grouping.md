@@ -26,7 +26,8 @@ Provider, password, CRC, geometry and unsupported-format failures do not request
 this fallback. Complete archives never enter it. RAR4 candidates with identical
 effective filename-order/file-number positions are ambiguous and rejected rather
 than ordered by map iteration. RAR5 continues to use its validated embedded
-indices. The separate RAR4 mixed-name ordering issue #49 is unchanged.
+indices. The separate [RAR4 mixed-name ordering fix](rar4-volume-ordering.md)
+now assigns consistent positions and rejects conflicting recognized aliases.
 
 This is structural archive validation, not a new archive-identity identifier or
 a complete payload/availability audit. The parser does not search combinations

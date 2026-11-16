@@ -4,8 +4,6 @@ import (
 	"fmt"
 	"path"
 	"path/filepath"
-	"regexp"
-	"strconv"
 	"strings"
 
 	"github.com/Tensai75/nzbparser"
@@ -14,39 +12,6 @@ import (
 	"github.com/Trifocals3537/tessarr/pkg/storage"
 	"github.com/Trifocals3537/tessarr/pkg/usenet/types"
 )
-
-// getRARVolumeOrder returns a sort key for RAR volume ordering.
-// .rar or .part01.rar = 0 (first volume)
-// .r00 = 1, .r01 = 2, etc.
-// .part02.rar = 2, .part03.rar = 3, etc.
-func getRARVolumeOrder(filename string) int {
-	lower := strings.ToLower(filename)
-	ext := filepath.Ext(lower)
-	base := strings.TrimSuffix(lower, ext)
-
-	// Old-style naming: .rar, .r00, .r01, ...
-	if ext == ".rar" {
-		// Check for .partXX.rar pattern (new style)
-		partPattern := regexp.MustCompile(`\.part(\d+)$`)
-		if matches := partPattern.FindStringSubmatch(base); len(matches) == 2 {
-			num, _ := strconv.Atoi(matches[1])
-			return num // .part01.rar = 1, .part02.rar = 2
-		}
-		// Plain .rar is the first volume
-		return 0
-	}
-
-	// .rXX pattern (old style continuation)
-	if len(ext) == 4 && ext[0:2] == ".r" {
-		numStr := ext[2:]
-		if num, err := strconv.Atoi(numStr); err == nil {
-			return num + 1 // .r00 = 1, .r01 = 2, etc.
-		}
-	}
-
-	// Unknown pattern, put at end
-	return 999999
-}
 
 func wrapNZBFile(f *storage.NZBFile) ([]*storage.NZBFile, error) {
 	if f == nil {

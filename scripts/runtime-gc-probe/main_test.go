@@ -1,6 +1,7 @@
 package main
 
 import (
+	"io"
 	"strings"
 	"testing"
 )
@@ -37,5 +38,19 @@ func TestCaptureKeepsDrainingAfterItsBound(t *testing.T) {
 	}
 	if capture.Len() != maxOutput || !capture.truncated {
 		t.Fatalf("unbounded capture: %d %v", capture.Len(), capture.truncated)
+	}
+}
+
+func TestCaptureBoundAppliesToPipeCopies(t *testing.T) {
+	var capture cappedOutput
+	data := strings.Repeat("x", maxOutput+100)
+	// os/exec copies pipe readers with io.Copy. Do not expose Buffer.ReadFrom:
+	// it would bypass the bounded Write method through io.Copy's fast path.
+	reader := struct{ io.Reader }{strings.NewReader(data)}
+	if n, err := io.Copy(&capture, reader); err != nil || n != int64(len(data)) {
+		t.Fatalf("pipe copy stopped draining: %d %v", n, err)
+	}
+	if capture.Len() != maxOutput || !capture.truncated {
+		t.Fatalf("pipe bypassed capture limit: %d %v", capture.Len(), capture.truncated)
 	}
 }

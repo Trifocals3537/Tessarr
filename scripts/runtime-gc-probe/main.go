@@ -17,14 +17,17 @@ import (
 const maxOutput = 64 << 10
 
 type cappedOutput struct {
-	bytes.Buffer
+	buffer    bytes.Buffer
 	truncated bool
 }
+
+func (b *cappedOutput) Len() int       { return b.buffer.Len() }
+func (b *cappedOutput) String() string { return b.buffer.String() }
 
 func (b *cappedOutput) Write(p []byte) (int, error) {
 	n := len(p)
 	keep := min(n, maxOutput-b.Len())
-	_, _ = b.Buffer.Write(p[:keep])
+	_, _ = b.buffer.Write(p[:keep])
 	b.truncated = b.truncated || keep < n
 	return n, nil // Drain the child even when the diagnostic capture is full.
 }

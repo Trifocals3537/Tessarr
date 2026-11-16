@@ -15,6 +15,7 @@ class RepairManager {
         this.loadAll();
         this.loadCleanup();
         this.cleanupTimer = setInterval(() => this.loadCleanup(), 15000);
+		if (document.getElementById('par2Panel')) this.par2Recovery = new PAR2RecoveryManager(this.api);
         window.addEventListener("pagehide", () => clearInterval(this.cleanupTimer), {once: true});
     }
 
@@ -847,3 +848,131 @@ class RepairManager {
 }
 
 window.RepairManager = RepairManager;
+
+class PAR2RecoveryManager {
+    constructor(api) {
+        this.api = api;
+        this.cursor = '';
+        this.targets = new Map();
+        this.searchRevision = 0;
+        this.jobsRevision = 0;
+        this.query = '';
+        this.timer = null;
+        this.stopped = false;
+        document.getElementById('par2SearchBtn').addEventListener('click', () => this.search(true));
+        document.getElementById('par2MoreBtn').addEventListener('click', () => this.search(false));
+        document.getElementById('par2RefreshBtn').addEventListener('click', () => this.loadJobs());
+        document.getElementById('par2Form').addEventListener('submit', (event) => { event.preventDefault(); this.start(); });
+        window.addEventListener('pagehide', () => { this.stopped = true; clearTimeout(this.timer); }, {once: true});
+        this.loadJobs();
+    }
+
+    status(message) { document.getElementById('par2Status').textContent = message; }
+
+    async request(path, options = {}) {
+        const response = await fetch(`${this.api}/usenet/recovery/${path}`, {...options, credentials: 'same-origin'});
+        let data;
+        try { data = await response.json(); } catch { throw new Error(`Recovery request failed (HTTP ${response.status}).`); }
+        if (!response.ok) throw new Error(data.error || `Recovery request failed (HTTP ${response.status}).`);
+        return data;
+    }
+
+    async search(reset) {
+        const query = document.getElementById('par2Search').value.trim();
+        if (query.length < 2) { this.status('Enter at least two characters from the NZB name.'); return; }
+        if (reset || query !== this.query) { this.cursor = ''; this.targets.clear(); document.getElementById('par2Target').replaceChildren(); }
+        this.query = query;
+        const revision = ++this.searchRevision;
+        const button = document.getElementById('par2SearchBtn');
+        const more = document.getElementById('par2MoreBtn');
+        button.disabled = true;
+        more.disabled = true;
+        this.status('Finding existing files…');
+        try {
+            for (let page = 0; page < 3; page++) {
+                const data = await this.request(`targets?q=${encodeURIComponent(query)}&after=${encodeURIComponent(this.cursor)}`);
+                if (revision !== this.searchRevision || this.stopped) return;
+                for (const item of data.items || []) this.targets.set(JSON.stringify([item.nzb_id, item.file]), item);
+                this.cursor = data.next || '';
+                if (!this.cursor || this.targets.size >= 50) break;
+            }
+            const select = document.getElementById('par2Target');
+            select.replaceChildren();
+            for (const [key, item] of this.targets) {
+                const option = document.createElement('option');
+                option.value = key;
+                option.textContent = `${item.nzb} — ${item.file}`;
+                select.append(option);
+            }
+            document.getElementById('par2MoreBtn').classList.toggle('hidden', !this.cursor);
+            this.status(this.targets.size ? 'Select a file and its original NZB, then start recovery.' : this.cursor ? 'No matches in this page. Continue searching or use a more specific NZB name.' : 'No matching supported plain files were found.');
+        } catch (error) { if (revision === this.searchRevision) this.status(error.message); }
+        finally { if (revision === this.searchRevision) { button.disabled = false; more.disabled = false; } }
+    }
+
+    async start() {
+        const target = this.targets.get(document.getElementById('par2Target').value);
+        if (!target) { this.status('Find and select an existing file first.'); return; }
+        const source = document.getElementById('par2Source').files?.[0];
+        if (source && source.size > 16 * 1024 * 1024) { this.status('The original NZB must be no larger than 16 MiB.'); return; }
+        const form = new FormData();
+        form.append('nzb_id', target.nzb_id);
+        form.append('file', target.file);
+        if (source) form.append('source', source);
+        const button = document.getElementById('par2StartBtn');
+        button.disabled = true;
+        try {
+            await this.request('jobs', {method: 'POST', body: form});
+            document.getElementById('par2Source').value = '';
+            this.status('Recovery queued.');
+            await this.loadJobs();
+        } catch (error) { this.status(error.message); }
+        finally { button.disabled = false; }
+    }
+
+    async cancel(id, button) {
+        button.disabled = true;
+        try { await this.request(`jobs/${encodeURIComponent(id)}`, {method: 'DELETE'}); await this.loadJobs(); }
+        catch (error) { this.status(error.message); button.disabled = false; }
+    }
+
+    async loadJobs() {
+        clearTimeout(this.timer);
+        if (this.stopped) return;
+        const revision = ++this.jobsRevision;
+        try {
+            const data = await this.request('jobs');
+            if (this.stopped || revision !== this.jobsRevision) return;
+            const jobs = data.jobs || [];
+            this.renderJobs(jobs);
+            const active = jobs.some(job => job.state === 'queued' || job.state === 'running');
+            if (active) this.timer = setTimeout(() => this.loadJobs(), 2000);
+            if (!jobs.length) this.status('No recovery jobs yet.');
+        } catch (error) { if (!this.stopped && revision === this.jobsRevision) this.status(error.message); }
+    }
+
+    renderJobs(jobs) {
+        const list = document.getElementById('par2Jobs');
+        list.replaceChildren();
+        for (const job of jobs) {
+            const row = document.createElement('div');
+            row.className = 'bg-base-200 rounded-lg p-3 space-y-2';
+            const title = document.createElement('p');
+            title.className = 'font-medium break-all';
+            title.textContent = job.file;
+            const detail = document.createElement('p');
+            detail.className = 'text-sm';
+            detail.textContent = `${job.state} · ${job.stage} · ${(Math.max(0, Number(job.read_bytes) || 0) / 1048576).toFixed(1)} MiB read`;
+            row.append(title, detail);
+            if (job.reason) { const reason = document.createElement('p'); reason.className = 'text-sm break-all'; reason.textContent = job.reason; row.append(reason); }
+            if (job.state === 'queued' || job.state === 'running') {
+                const button = document.createElement('button');
+                button.type = 'button'; button.className = 'btn btn-outline btn-sm'; button.textContent = 'Cancel recovery';
+                button.addEventListener('click', () => this.cancel(job.id, button));
+                row.append(button);
+            }
+            list.append(row);
+        }
+    }
+}
+window.PAR2RecoveryManager = PAR2RecoveryManager;

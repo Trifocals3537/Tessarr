@@ -178,6 +178,28 @@ func (sf *SegmentFetcher) doFetch(ctx context.Context, segIdx int) error {
 	}
 
 	// Acquire connection slot
+	// A complete repaired article also satisfies prefetch after a restart.
+	if sf.config.RecoveredArticle != nil {
+		writer := sf.cache.StreamWriter(segIdx)
+		if writer == nil {
+			sf.cache.ReleaseFetching(segIdx)
+			return ErrCacheClosed
+		}
+		hit, err := sf.config.RecoveredArticle(ctx, *seg, writer)
+		if err != nil {
+			writer.Discard()
+			sf.cache.ReleaseFetching(segIdx)
+			return err
+		}
+		if hit {
+			if err := writer.Finalize(); err != nil {
+				writer.Discard()
+				sf.cache.ReleaseFetching(segIdx)
+				return err
+			}
+			return nil
+		}
+	}
 	select {
 	case sf.semaphore <- struct{}{}:
 		defer func() { <-sf.semaphore }()

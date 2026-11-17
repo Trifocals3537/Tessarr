@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"runtime/debug"
 	"sort"
 	"sync"
 	"time"
@@ -12,12 +13,14 @@ import (
 	"github.com/Trifocals3537/tessarr/internal/nntp"
 	"github.com/Trifocals3537/tessarr/internal/safepath"
 	"github.com/google/uuid"
+	"github.com/rs/zerolog"
 )
 
 var ErrBusy = errors.New("recovery is busy; try again shortly")
 var ErrNotFound = errors.New("recovery job not found")
 var ErrState = errors.New("recovery state could not be saved")
 var ErrUnavailable = errors.New("manual recovery is unavailable; check the application logs")
+var ErrPanicked = errors.New("recovery stopped unexpectedly; check the application logs")
 
 // Progress is checkpointed at least once per second of incoming data. Include
 // one bounded write ahead of the pacer as well as that interval after a crash.
@@ -47,6 +50,7 @@ type Service struct {
 	store         *Store
 	owner         *filelock.Lock
 	host          Host
+	logger        zerolog.Logger
 	jobs          []Job
 	ctx           context.Context
 	cancel        context.CancelFunc
@@ -62,8 +66,8 @@ type Service struct {
 	run func(context.Context, Target, Host, *Store, int64, progress) error
 }
 
-func NewService(parent context.Context, path string, host Host) (*Service, error) {
-	s, err := OpenService(parent, path, host)
+func NewService(parent context.Context, path string, host Host, logger zerolog.Logger) (*Service, error) {
+	s, err := OpenService(parent, path, host, logger)
 	if err == nil {
 		s.Begin()
 	}
@@ -71,7 +75,7 @@ func NewService(parent context.Context, path string, host Host) (*Service, error
 }
 
 // OpenService lets the owner finish wiring callbacks before saved jobs resume.
-func OpenService(parent context.Context, path string, host Host) (*Service, error) {
+func OpenService(parent context.Context, path string, host Host, logger zerolog.Logger) (*Service, error) {
 	root, absolute, err := safepath.EnsureOpenRoot(path, 0o700)
 	if err != nil {
 		return nil, err
@@ -91,7 +95,7 @@ func OpenService(parent context.Context, path string, host Host) (*Service, erro
 		return nil, err
 	}
 	ctx, cancel := context.WithCancel(parent)
-	s := &Service{store: store, owner: owner, host: host, ctx: ctx, cancel: cancel, notify: make(chan struct{}, 1), done: make(chan struct{}), run: Run}
+	s := &Service{store: store, owner: owner, host: host, logger: logger, ctx: ctx, cancel: cancel, notify: make(chan struct{}, 1), done: make(chan struct{}), run: Run}
 	if err := s.load(); err != nil {
 		cancel()
 		_ = store.Close()
@@ -326,6 +330,8 @@ func safeReason(err error) string {
 		return ErrLimit.Error()
 	case errors.Is(err, ErrUnsupported):
 		return ErrUnsupported.Error()
+	case errors.Is(err, ErrPanicked):
+		return ErrPanicked.Error()
 	case errors.Is(err, ErrSourceRequired):
 		return ErrSourceRequired.Error()
 	case errors.Is(err, ErrState):
@@ -520,7 +526,8 @@ func (s *Service) worker() {
 func (s *Service) runSafely(ctx context.Context, target Target, host Host, alreadyRead int64, report progress) (err error) {
 	defer func() {
 		if recover() != nil {
-			err = ErrUnsupported
+			s.logger.Error().Bytes("stack", debug.Stack()).Msg("Manual PAR2 recovery panicked")
+			err = ErrPanicked
 		}
 	}()
 	return s.run(ctx, target, host, s.store, alreadyRead, report)

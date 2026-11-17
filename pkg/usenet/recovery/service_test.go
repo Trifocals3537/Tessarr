@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/rs/zerolog"
 )
 
 func waitForJob(t *testing.T, s *Service, id string, condition func(Job) bool) Job {
@@ -50,7 +51,7 @@ func TestManualUploadIsRequiredBoundAndReusable(t *testing.T) {
 		}
 	}
 	root := filepath.Join(t.TempDir(), "recovery")
-	s, err := NewService(t.Context(), root, h)
+	s, err := NewService(t.Context(), root, h, zerolog.Nop())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -70,7 +71,7 @@ func TestManualUploadIsRequiredBoundAndReusable(t *testing.T) {
 	if err != nil || duplicate.ID != j.ID {
 		t.Fatalf("duplicate admission: %v %+v", err, duplicate)
 	}
-	if other, err := NewService(t.Context(), root, h); err == nil {
+	if other, err := NewService(t.Context(), root, h, zerolog.Nop()); err == nil {
 		_ = other.Close()
 		t.Fatal("two owners acquired the same store")
 	}
@@ -82,7 +83,7 @@ func TestManualUploadIsRequiredBoundAndReusable(t *testing.T) {
 	if err := s.Close(); err != nil {
 		t.Fatal(err)
 	}
-	s, err = NewService(t.Context(), root, h)
+	s, err = NewService(t.Context(), root, h, zerolog.Nop())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -114,7 +115,7 @@ func TestShutdownPersistsUnfinishedWorkAndResumes(t *testing.T) {
 		return ctx.Err()
 	}
 	root := filepath.Join(t.TempDir(), "recovery")
-	s, err := NewService(t.Context(), root, h)
+	s, err := NewService(t.Context(), root, h, zerolog.Nop())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -131,7 +132,7 @@ func TestShutdownPersistsUnfinishedWorkAndResumes(t *testing.T) {
 		t.Fatal(err)
 	}
 	h.idle = nil
-	s, err = NewService(t.Context(), root, h)
+	s, err = NewService(t.Context(), root, h, zerolog.Nop())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -158,7 +159,7 @@ func TestCrashRecoveryAcrossPublicationBoundaries(t *testing.T) {
 			h := newFixtureHost(t)
 			h.fail["fileA.bin-0@fixture.invalid"] = missingArticle()
 			h.target.Source = nil
-			s, err := NewService(t.Context(), root, h)
+			s, err := NewService(t.Context(), root, h, zerolog.Nop())
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -182,7 +183,7 @@ func TestRecoveryCrashChild(t *testing.T) {
 	}
 	h := newFixtureHost(t)
 	h.fail["fileA.bin-0@fixture.invalid"] = missingArticle()
-	s, err := OpenService(context.Background(), root, h)
+	s, err := OpenService(context.Background(), root, h, zerolog.Nop())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -215,7 +216,7 @@ func TestCorruptJobStateIsPreservedAndExpiredWorkDoesNotRun(t *testing.T) {
 	}
 	_ = store.Close()
 	h := newFixtureHost(t)
-	if s, err := NewService(t.Context(), root, h); err == nil {
+	if s, err := NewService(t.Context(), root, h, zerolog.Nop()); err == nil {
 		_ = s.Close()
 		t.Fatal("accepted corrupt state")
 	}
@@ -232,7 +233,7 @@ func TestCorruptJobStateIsPreservedAndExpiredWorkDoesNotRun(t *testing.T) {
 		t.Fatal(err)
 	}
 	_ = store.Close()
-	s, err := NewService(t.Context(), root, h)
+	s, err := NewService(t.Context(), root, h, zerolog.Nop())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -246,7 +247,7 @@ func TestCorruptJobStateIsPreservedAndExpiredWorkDoesNotRun(t *testing.T) {
 func TestRemovingNZBForgetsOnlyItsOwnedRecovery(t *testing.T) {
 	h := newFixtureHost(t)
 	h.fail["fileA.bin-0@fixture.invalid"] = missingArticle()
-	s, err := NewService(t.Context(), filepath.Join(t.TempDir(), "recovery"), h)
+	s, err := NewService(t.Context(), filepath.Join(t.TempDir(), "recovery"), h, zerolog.Nop())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -278,7 +279,7 @@ func TestRemovingNZBForgetsOnlyItsOwnedRecovery(t *testing.T) {
 
 func TestCancellationFencesPendingPublication(t *testing.T) {
 	h := newFixtureHost(t)
-	s, err := OpenService(t.Context(), filepath.Join(t.TempDir(), "recovery"), h)
+	s, err := OpenService(t.Context(), filepath.Join(t.TempDir(), "recovery"), h, zerolog.Nop())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -327,7 +328,7 @@ func TestCancellationFencesPendingPublication(t *testing.T) {
 
 func TestHistoryPruningDoesNotMoveActiveJobProgress(t *testing.T) {
 	h := newFixtureHost(t)
-	s, err := OpenService(t.Context(), filepath.Join(t.TempDir(), "recovery"), h)
+	s, err := OpenService(t.Context(), filepath.Join(t.TempDir(), "recovery"), h, zerolog.Nop())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -381,7 +382,7 @@ func TestHistoryPruningDoesNotMoveActiveJobProgress(t *testing.T) {
 func TestRecoveryOwnershipPrecedesCollectionAndUnrelatedRemovalDoesNotWrite(t *testing.T) {
 	h := newFixtureHost(t)
 	root := filepath.Join(t.TempDir(), "recovery")
-	s, err := OpenService(t.Context(), root, h)
+	s, err := OpenService(t.Context(), root, h, zerolog.Nop())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -390,7 +391,7 @@ func TestRecoveryOwnershipPrecedesCollectionAndUnrelatedRemovalDoesNotWrite(t *t
 	if err := os.WriteFile(temporary, []byte("in-flight fixture"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if other, err := OpenService(t.Context(), root, h); err == nil {
+	if other, err := OpenService(t.Context(), root, h, zerolog.Nop()); err == nil {
 		_ = other.Close()
 		t.Fatal("second owner acquired store")
 	}
@@ -421,7 +422,7 @@ func TestRecoveryRejectsNonRegularOwnerLock(t *testing.T) {
 			} else if err := os.Symlink(outside, lock); err != nil {
 				t.Skipf("symlinks unavailable: %v", err)
 			}
-			if s, err := OpenService(t.Context(), root, newFixtureHost(t)); err == nil {
+			if s, err := OpenService(t.Context(), root, newFixtureHost(t), zerolog.Nop()); err == nil {
 				_ = s.Close()
 				t.Fatal("non-regular lock was accepted")
 			}
@@ -457,7 +458,7 @@ func (h *admissionGateHost) Snapshot(ctx context.Context, id, name string) (Targ
 func TestRemovalFencesAdmissionThatAlreadyCapturedTarget(t *testing.T) {
 	fixture := newFixtureHost(t)
 	h := &admissionGateHost{Host: fixture, captured: make(chan struct{}), release: make(chan struct{})}
-	s, err := OpenService(t.Context(), filepath.Join(t.TempDir(), "recovery"), h)
+	s, err := OpenService(t.Context(), filepath.Join(t.TempDir(), "recovery"), h, zerolog.Nop())
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -15,13 +15,16 @@ snapshots, and the expected GC abort stack before it reports
 output, and unrelated crashes fail the diagnostic job. Each child has a
 45-second deadline and a 128 KiB output limit.
 
-The workflow samples sixteen separate GitHub-hosted Windows runners because the
+The workflow samples four separate GitHub-hosted Windows runners per run because the
 upstream report found that the failure depended on the runner's processor and
 enabled context state. It records each runner's processor, enabled XSTATE mask,
 and required Windows exception context size using documented Windows APIs. A
 clean host cannot exclude the problem elsewhere. An
 independent reproducer matching the GC error also cannot establish that this
 was Tessarr's original failure. Follow attribution in issue #65.
+
+Artifact names include the workflow attempt number, so a single sample can be
+rerun on a new hosted runner without overwriting earlier evidence.
 
 On hosts with a context larger than the current 4096-byte Windows stack
 reserve, the workflow also runs three complete manager-suite repetitions on

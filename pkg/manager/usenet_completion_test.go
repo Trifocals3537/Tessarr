@@ -379,7 +379,9 @@ func TestNZBCompletionPanicFailsOnceWithoutLeakingItsPayload(t *testing.T) {
 	m, entry, metadata := newNZBCompletionTestManager(t, config.DownloadActionDownload)
 	outcomes := &nzbCompletionOutcomes{store: m.storage}
 	m.queue.outcomes = outcomes
+	var downloadCalls atomic.Int32
 	m.downloader.usenetDownload = func(context.Context, string, string, io.Writer, func(int64, int64)) error {
+		downloadCalls.Add(1)
 		panic("private-provider-url")
 	}
 	if err := m.processNZB(context.Background(), entry, metadata); !errors.Is(err, workflow.ErrPanicked) {
@@ -387,6 +389,9 @@ func TestNZBCompletionPanicFailsOnceWithoutLeakingItsPayload(t *testing.T) {
 	}
 	if err := m.processNZB(context.Background(), entry, metadata); err != nil {
 		t.Fatal(err)
+	}
+	if got := downloadCalls.Load(); got != 1 {
+		t.Fatalf("download panic fixture invoked %d times, want 1", got)
 	}
 	current, err := m.queue.GetTorrent(entry.InfoHash)
 	if err != nil || current.State != storage.EntryStateError || current.LastError != workflow.ErrPanicked.Error() || outcomes.failed.Load() != 1 {

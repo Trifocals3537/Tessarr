@@ -151,7 +151,11 @@ func TestWorkerPanicDurablyFailsAcceptedJobAndKeepsPoolAlive(t *testing.T) {
 }
 
 func TestOutcomeCommitFailureBlocksFurtherAdmissionsAndDegradesReadiness(t *testing.T) {
-	provider := &routingTestClient{cfg: config.Debrid{Name: "torbox"}, submit: func(*debridTypes.Torrent) (*debridTypes.Torrent, error) { panic("injected") }}
+	var calls atomic.Int32
+	provider := &routingTestClient{cfg: config.Debrid{Name: "torbox"}, submit: func(*debridTypes.Torrent) (*debridTypes.Torrent, error) {
+		calls.Add(1)
+		panic("injected")
+	}}
 	m, root := newAsyncAdmissionTestManager(t, provider, 1)
 	repository := &failingOutcomeStore{err: errors.New("checkpoint failed")}
 	m.queue.outcomes = repository
@@ -166,6 +170,9 @@ func TestOutcomeCommitFailureBlocksFurtherAdmissionsAndDegradesReadiness(t *test
 	}
 	if !errors.Is(m.workflowAvailable(), ErrWorkflowUnavailable) {
 		t.Fatal("checkpoint failure not surfaced")
+	}
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("submission panic fixture invoked %d times, want 1", got)
 	}
 	if status := m.ReadinessStatus(); status.Ready || status.Phase != LifecyclePhaseDegraded {
 		t.Fatal(status)
@@ -231,6 +238,7 @@ func TestStaleOutcomeCannotMarkReplacementFailedOrDegradeService(t *testing.T) {
 func TestScheduledWorkflowRecordsPanicAndPreservesCanceledWork(t *testing.T) {
 	for _, canceled := range []bool{false, true} {
 		t.Run(map[bool]string{false: "panic", true: "shutdown"}[canceled], func(t *testing.T) {
+			var ran atomic.Bool
 			m := newQueueRecoveryTestManager(t)
 			entry := interruptedQueueTestEntry("scheduled-outcome")
 			if err := m.queue.Add(entry); err != nil {
@@ -239,6 +247,7 @@ func TestScheduledWorkflowRecordsPanicAndPreservesCanceledWork(t *testing.T) {
 			ctx, cancel := context.WithCancel(m.ctx)
 			defer cancel()
 			if !m.startEntryBackground(ctx, "outcome-test", entry, func(ctx context.Context) error {
+				ran.Store(true)
 				if canceled {
 					cancel()
 					return ctx.Err()
@@ -250,6 +259,9 @@ func TestScheduledWorkflowRecordsPanicAndPreservesCanceledWork(t *testing.T) {
 			m.stopAcceptingBackgroundWork()
 			if err := m.waitForBackground(); err != nil {
 				t.Fatal(err)
+			}
+			if !ran.Load() {
+				t.Fatal("scheduled panic fixture did not run")
 			}
 			current, err := m.queue.GetTorrent(entry.InfoHash)
 			if err != nil {

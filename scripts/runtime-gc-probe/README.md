@@ -24,3 +24,7 @@ The Windows runtime diagnostic workflow runs this probe and then the manager
 suite with JSON test events, garbage-collector validation, and pointer checks.
 It saves the GitHub-generated evidence for seven days. Normal product builds
 and runtime settings do not use this diagnostic configuration.
+
+The ordinary Windows CI job also records structured test events and preserves
+them as an artifact on failure. This provides test identities and chronology
+if an intermittent abort recurs outside a dedicated diagnostic run.

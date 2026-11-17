@@ -10,7 +10,9 @@ import (
 	"net/http/httptest"
 	"net/textproto"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"testing"
@@ -33,6 +35,42 @@ const recoveryNameNZB = `<?xml version="1.0" encoding="UTF-8"?>
 var recoveryNameTLSOnce sync.Once
 var recoveryNameTLSCertificate tls.Certificate
 
+const recoveryNameTLSChild = "TESSARR_RECOVERY_NAME_TLS_CHILD"
+
+// SetFallbackRoots changes process-wide trust and cannot be undone. Keep every
+// recovery/admission fixture that needs these roots in its own test process.
+func runNZBRecoveryTLSChild(t *testing.T) bool {
+	t.Helper()
+	if os.Getenv(recoveryNameTLSChild) == t.Name() {
+		return false
+	}
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 90*time.Second)
+	defer cancel()
+	child := exec.CommandContext(ctx, executable, "-test.run=^"+regexp.QuoteMeta(t.Name())+"$", "-test.timeout=80s", "-test.v")
+	child.Env = append(os.Environ(), recoveryNameTLSChild+"="+t.Name())
+	output, err := child.CombinedOutput()
+	if err != nil {
+		t.Fatalf("isolated recovery TLS fixture failed: %v context=%v\n%s", err, ctx.Err(), output)
+	}
+	t.Logf("isolated recovery TLS fixture:\n%s", output)
+	return true
+}
+
+func TestNZBRecoveryTLSFixturePreservesParentTrust(t *testing.T) {
+	if os.Getenv(recoveryNameTLSChild) == t.Name() {
+		m := newNZBRecoveryNameTestManager(t)
+		admitRecoveryNameNZB(t, m, "Synthetic.nzb")
+		return
+	}
+	t.Run("before", TestStreamClientRejectsUntrustedTLSByDefault)
+	runNZBRecoveryTLSChild(t)
+	t.Run("after", TestStreamClientRejectsUntrustedTLSByDefault)
+}
+
 type nzbRecoveryFixtureOptions struct {
 	statCode  int
 	bodyCodes map[string]int
@@ -40,6 +78,10 @@ type nzbRecoveryFixtureOptions struct {
 
 func newNZBRecoveryNameTestManager(t *testing.T, options ...nzbRecoveryFixtureOptions) *Manager {
 	t.Helper()
+	childTest := os.Getenv(recoveryNameTLSChild)
+	if childTest == "" || (t.Name() != childTest && !strings.HasPrefix(t.Name(), childTest+"/")) {
+		t.Fatal("recovery TLS fixture requires an isolated test process")
+	}
 	statCode := 223
 	var bodyCodes map[string]int
 	if len(options) > 0 {
@@ -173,6 +215,9 @@ func admitRecoveryNameNZB(t *testing.T, m *Manager, filename string) *storage.En
 }
 
 func TestQueuedNZBRecoveryPreservesCanonicalNameAndOutput(t *testing.T) {
+	if runNZBRecoveryTLSChild(t) {
+		return
+	}
 	for _, tc := range []struct {
 		filename, canonical                         string
 		stagedOnly, legacyOutput, originalDifferent bool
@@ -283,6 +328,9 @@ func TestQueuedNZBRecoveryPreservesCanonicalNameAndOutput(t *testing.T) {
 }
 
 func TestQueuedNZBRecoveryRejectsUnsafePlacementBeforeChangingArtifacts(t *testing.T) {
+	if runNZBRecoveryTLSChild(t) {
+		return
+	}
 	for _, scenario := range []string{"different output", "different save root", "unsafe name", "previously shortened name"} {
 		t.Run(scenario, func(t *testing.T) {
 			m := newNZBRecoveryNameTestManager(t)
@@ -329,6 +377,9 @@ func TestQueuedNZBRecoveryRejectsUnsafePlacementBeforeChangingArtifacts(t *testi
 }
 
 func TestQueuedNZBRecoveryCancellationPreservesSourceAndIdentity(t *testing.T) {
+	if runNZBRecoveryTLSChild(t) {
+		return
+	}
 	m := newNZBRecoveryNameTestManager(t)
 	entry := admitRecoveryNameNZB(t, m, "Demo.S01E01.WEB.H264.nzb")
 	staged, err := os.ReadFile(entry.Magnet)

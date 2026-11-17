@@ -164,6 +164,9 @@ func TestNZBRejectionCountersAreConcurrentAndSaturating(t *testing.T) {
 }
 
 func TestNZBAdmissionRecordsParseRejectionsBeforeQueue(t *testing.T) {
+	if runNZBRecoveryTLSChild(t) {
+		return
+	}
 	for _, test := range []struct {
 		name, content string
 		stat          int
@@ -200,6 +203,9 @@ func TestNZBAdmissionRecordsParseRejectionsBeforeQueue(t *testing.T) {
 }
 
 func TestNZBSuccessfulAdmissionDoesNotRecordRejection(t *testing.T) {
+	if runNZBRecoveryTLSChild(t) {
+		return
+	}
 	m := newNZBRecoveryNameTestManager(t)
 	admitRecoveryNameNZB(t, m, "Synthetic.nzb")
 	if stats := m.NZBAdmissionStats(); stats.TotalRejected != 0 {
@@ -208,6 +214,9 @@ func TestNZBSuccessfulAdmissionDoesNotRecordRejection(t *testing.T) {
 }
 
 func TestNZBRedirectResponsesKeepInputClassification(t *testing.T) {
+	if runNZBRecoveryTLSChild(t) {
+		return
+	}
 	for _, test := range []struct {
 		name, content string
 		accepted      bool
@@ -251,6 +260,9 @@ func TestNZBRedirectResponsesKeepInputClassification(t *testing.T) {
 }
 
 func TestNZBObfuscatedAdmissionPreservesFailureKinds(t *testing.T) {
+	if runNZBRecoveryTLSChild(t) {
+		return
+	}
 	obfuscated := strings.Replace(recoveryNameNZB, "payload.mkv", "opaque-subject", 1)
 	for _, test := range []struct {
 		name, content string

@@ -15,7 +15,7 @@ snapshots, and the expected GC abort stack before it reports
 output, and unrelated crashes fail the diagnostic job. Each child has a
 45-second deadline and a 128 KiB output limit.
 
-This extended workflow run samples 32 separate GitHub-hosted Windows runners because the
+The workflow samples four separate GitHub-hosted Windows runners per run because the
 upstream report found that the failure depended on the runner's processor and
 enabled context state. It records each runner's processor, enabled XSTATE mask,
 and required Windows exception context size using documented Windows APIs. A

@@ -22,3 +22,15 @@ and required Windows exception context size using documented Windows APIs. A
 clean host cannot exclude the problem elsewhere. An
 independent reproducer matching the GC error also cannot establish that this
 was Tessarr's original failure. Follow attribution in issue #65.
+
+On hosts with a context larger than the current 4096-byte Windows stack
+reserve, the workflow also runs three complete manager-suite repetitions on
+the **same runner**, using normal GC settings. Sample 1 runs those repetitions
+as a control even if its context is small. This tests whether the application
+suite fails on the hosts where the independent reproducer fails; a passing
+suite does not rule out an intermittent crash.
+
+The ordinary Windows CI job also records the hosted runner's exception context
+with its existing test-failure artifact. This lets a future application crash
+be compared with the independent probe without guessing which processor or
+XSTATE configuration ran the suite.

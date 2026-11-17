@@ -56,6 +56,11 @@ jobs:
           New-Item -ItemType Directory -Path diagnostics -Force | Out-Null
           go version | Set-Content diagnostics/toolchain.txt
           go env GOOS GOARCH CGO_ENABLED GOVERSION GOEXPERIMENT | Add-Content diagnostics/toolchain.txt
+          try {
+            ./scripts/windows-exception-probe/context.ps1 > diagnostics/host-context.json
+          } catch {
+            '{"context":"unavailable"}' | Set-Content diagnostics/host-context.json
+          }
           go test -json -count=1 ./... 2>&1 | Tee-Object -FilePath diagnostics/windows-tests.jsonl
           exit $LASTEXITCODE
 

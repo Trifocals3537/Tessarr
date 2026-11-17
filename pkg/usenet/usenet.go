@@ -314,7 +314,7 @@ func New() (*Usenet, error) {
 	}
 	u.initLifecycle()
 
-	u.recovery, err = recovery.OpenService(u.ctx, u.recoveryPath(), recoveryHost{u: u})
+	u.recovery, err = recovery.OpenService(u.ctx, u.recoveryPath(), recoveryHost{u: u}, u.logger)
 	if err != nil {
 		u.logger.Warn().Err(err).Msg("Manual PAR2 recovery is unavailable; existing Usenet access remains active")
 	} else {

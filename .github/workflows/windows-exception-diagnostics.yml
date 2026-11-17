@@ -22,7 +22,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        attempt: [1, 2, 3, 4]
+        attempt: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
     env:
       CGO_ENABLED: "0"
       GOAMD64: v1
@@ -52,12 +52,12 @@ jobs:
           cache: true
           cache-dependency-path: go.sum
 
-      - name: Record toolchain and public runner processor
+      - name: Record toolchain and public runner context
         shell: pwsh
         run: |
           go version | Set-Content diagnostics/toolchain.txt
           go env GOOS GOARCH CGO_ENABLED GOVERSION GOEXPERIMENT | Add-Content diagnostics/toolchain.txt
-          Get-CimInstance Win32_Processor | Select-Object -ExpandProperty Name | Add-Content diagnostics/toolchain.txt
+          ./scripts/windows-exception-probe/context.ps1 > diagnostics/host-context.json
 
       - name: Verify classifier
         shell: pwsh
@@ -82,6 +82,7 @@ jobs:
           name: windows-exception-${{ matrix.attempt }}-${{ github.sha }}
           path: |
             diagnostics/toolchain.txt
+            diagnostics/host-context.json
             diagnostics/result.json
           if-no-files-found: error
           retention-days: 7

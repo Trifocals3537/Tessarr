@@ -145,6 +145,10 @@ func getProviderTorrents(ctx context.Context, client debrid.Client) ([]*types.To
 			torrents, err = client.GetTorrents()
 			return err
 		})
+		if outcome.Kind == workflow.Panicked {
+			log := client.Logger()
+			log.Error().Str("operation", "list_torrents").Bytes("stack", outcome.Stack).Msg("Legacy provider read panicked")
+		}
 		resultCh <- result{torrents: torrents, err: outcome.Err}
 	}()
 	select {

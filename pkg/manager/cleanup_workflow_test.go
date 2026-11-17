@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -281,17 +282,27 @@ func TestCleanupAccountChangeAndPersistedBackoff(t *testing.T) {
 	}
 }
 
-type panickingCleanupProvider struct{ *cleanupProvider }
+type panickingCleanupProvider struct {
+	*cleanupProvider
+	calls atomic.Int32
+}
 
-func (p *panickingCleanupProvider) DeleteTorrent(string) error { panic("secret-provider-response") }
+func (p *panickingCleanupProvider) DeleteTorrent(string) error {
+	p.calls.Add(1)
+	panic("secret-provider-response")
+}
 func TestCleanupPanicRetainsRecoverableWorkWithoutPersistingPayload(t *testing.T) {
 	root := t.TempDir()
 	m := cleanupManager(t, root)
-	m.clients.Store("fake", &panickingCleanupProvider{&cleanupProvider{root: root, key: "account-one"}})
+	provider := &panickingCleanupProvider{cleanupProvider: &cleanupProvider{root: root, key: "account-one"}}
+	m.clients.Store("fake", provider)
 	e := &storage.Entry{InfoHash: "cleanup-work", Name: "release", SavePath: m.config.DownloadFolder, State: storage.EntryStateDownloading, Providers: map[string]*storage.ProviderEntry{"fake": {Provider: "fake", ID: "remote-id"}}}
 	i := cleanupIntent(t, m, e, true)
 	if err := m.runCleanupIntent(i, false); err == nil {
 		t.Fatal("panic reported success")
+	}
+	if got := provider.calls.Load(); got != 1 {
+		t.Fatalf("cleanup panic fixture invoked %d times, want 1", got)
 	}
 	rows, err := m.storage.QueuedDeletionIntents()
 	if err != nil || len(rows) != 1 || rows[0].Work.State != workflow.RetryWait || !rows[0].Work.EffectStarted || rows[0].Work.Reason != "worker_panicked" {

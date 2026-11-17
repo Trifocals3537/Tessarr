@@ -4,7 +4,7 @@
   "description": "Media management tool",
   "scripts": {
     "test": "node --test",
-    "build-css": "tailwindcss --input pkg/server/assets/styles.css --output ./pkg/server/assets/build/css/styles.css --minify",
+    "build-css": "node scripts/build-css.mjs",
     "minify-js": "node scripts/minify-js.js",
     "download-assets": "node scripts/download-assets.js",
     "build": "npm run build-css && npm run minify-js",
@@ -12,12 +12,10 @@
     "dev": "npm run build && air"
   },
   "devDependencies": {
-    "@tailwindcss/cli": "4.3.5",
+    "@tailwindcss/postcss": "4.3.5",
     "daisyui": "^5.8.0",
+    "postcss": "^8.5.25",
     "tailwindcss": "4.3.5",
     "terser": "^5.51.2"
-  },
-  "overrides": {
-    "@parcel/watcher": "2.6.0"
   }
 }

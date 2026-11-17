@@ -22,7 +22,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        attempt: [1, 2, 3, 4]
+        attempt: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32]
     env:
       CGO_ENABLED: "0"
       GOAMD64: v1
@@ -60,6 +60,7 @@ jobs:
           go env GOOS GOARCH CGO_ENABLED GOVERSION GOEXPERIMENT | Add-Content diagnostics/toolchain.txt
           ./scripts/windows-exception-probe/context.ps1 > diagnostics/host-context.json
           $hostContext = Get-Content diagnostics/host-context.json -Raw | ConvertFrom-Json
+          Write-Host ("Hosted runner context: processor={0}; xstate={1}; context_bytes={2}" -f $hostContext.processor, $hostContext.enabled_xstate_mask, $hostContext.context_size_bytes)
           if ($hostContext.context_size_bytes -gt 4096) {
             "large_context=true" >> $env:GITHUB_OUTPUT
           }

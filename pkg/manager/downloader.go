@@ -99,8 +99,19 @@ func (d *Downloader) download(ctx context.Context, torrent *storage.Entry) error
 	}
 	// Recheck persisted entries against the current naming policy before
 	// changing queue state or creating output, including multi-season parents.
+	mountSource := torrent
+	if torrent.SeasonSource != nil || torrent.FileScopeRestricted {
+		source, err := d.manager.seasonSource(torrent)
+		if err != nil {
+			return err
+		}
+		// Validate the source using this action, which may differ from the
+		// parent's action on an explicit retry.
+		source.Action = torrent.Action
+		mountSource = source
+	}
 	if torrent.IsTorrent() {
-		if err := validateTorrentSourceFolder(torrent, config.Get().FolderNaming, false); err != nil {
+		if err := validateTorrentSourceFolder(mountSource, config.Get().FolderNaming, false); err != nil {
 			return err
 		}
 	}
@@ -120,15 +131,17 @@ func (d *Downloader) download(ctx context.Context, torrent *storage.Entry) error
 	if !torrent.SkipMultiSeason {
 		isMultiSeason, seasons = d.detectMultiSeason(torrent)
 	}
-	torrentMountPath := d.manager.GetTorrentMountPath(torrent)
+	torrentMountPath := d.manager.GetTorrentMountPath(mountSource)
 	if isMultiSeason {
 		seasonResults := convertToMultiSeason(torrent, seasons)
+		var failures []error
 		for _, result := range seasonResults {
 			if err := ctx.Err(); err != nil {
 				return err
 			}
 			if err := d.manager.queue.Add(result); err != nil {
 				d.logger.Error().Err(err).Msgf("Failed to save season torrent")
+				failures = append(failures, fmt.Errorf("season %q: %w", result.Name, err))
 				continue
 			}
 			childWork, err := d.manager.entryLifecycle.startWork(
@@ -138,6 +151,7 @@ func (d *Downloader) download(ctx context.Context, torrent *storage.Entry) error
 			)
 			if err != nil {
 				d.markAsError(result, err)
+				failures = append(failures, fmt.Errorf("season %q: %w", result.Name, err))
 				continue
 			}
 			childErr := func() error {
@@ -147,10 +161,18 @@ func (d *Downloader) download(ctx context.Context, torrent *storage.Entry) error
 			if errors.Is(childErr, errDeleteQueueEntryOnJobFinish) {
 				if err := d.manager.queue.Delete(result.InfoHash, nil); err != nil {
 					d.markAsError(result, err)
+					failures = append(failures, fmt.Errorf("season %q: %w", result.Name, err))
 				}
 			} else if childErr != nil {
 				d.markAsError(result, childErr)
+				failures = append(failures, fmt.Errorf("season %q: %w", result.Name, childErr))
 			}
+		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if len(failures) > 0 {
+			return fmt.Errorf("multi-season import failed: %w", errors.Join(failures...))
 		}
 		// Parent has been fanned out into season entries; mark it complete so
 		// it leaves the downloading queue instead of getting re-processed.
@@ -174,7 +196,7 @@ func (d *Downloader) process(ctx context.Context, entry *storage.Entry, mountPat
 			return fmt.Errorf("claim usenet download path: %w", err)
 		}
 		for _, file := range entry.GetActiveFiles() {
-			if _, err := safeUsenetFilePath(d.dest, entry, file.Name); err != nil {
+			if _, err := usenetActionFilePath(d.dest, entry, file.Name); err != nil {
 				return err
 			}
 		}
@@ -290,7 +312,9 @@ func (d *Downloader) processSymlink(ctx context.Context, entry *storage.Entry, m
 	}
 
 	entry.IsDownloading = true
-	_ = d.manager.queue.Update(entry)
+	if err := d.manager.queue.Update(entry); err != nil {
+		return err
+	}
 
 	if err := d.waitForSymlinkFilesReady(ctx, filePaths, symlinkReadyTimeout); err != nil {
 		return err
@@ -306,7 +330,7 @@ func (d *Downloader) processSymlink(ctx context.Context, entry *storage.Entry, m
 			return fmt.Errorf("prepare import readiness check: %w", err)
 		}
 		if len(probeFiles) > 0 {
-			if err := d.manager.verifyImportReadiness(ctx, entry.InfoHash, probeFiles); err != nil {
+			if err := d.manager.verifyImportReadiness(ctx, entry, probeFiles); err != nil {
 				if ctx.Err() != nil {
 					return ctx.Err()
 				}
@@ -398,17 +422,11 @@ func (d *Downloader) createSymlinksWhenMountFilesAppear(ctx context.Context, ent
 					}
 
 					if file, exists := remainingFiles[entryName]; exists {
-						fileSymlinkPath, pathErr := safeUsenetFilePath(d.dest, entry, file.Name)
-						if pathErr != nil {
+						if err := ctx.Err(); err != nil {
 							_ = directory.Close()
-							return pathErr
+							return err
 						}
-						storedTarget, targetErr := symlinkTarget(fileSymlinkPath, fullPath, d.relativeSymlinksEnabled())
-						if targetErr != nil {
-							_ = directory.Close()
-							return targetErr
-						}
-						linkErr := safepath.Symlink(d.dest, storedTarget, fileSymlinkPath)
+						fileSymlinkPath, linkErr := createOwnedUsenetSymlink(d.dest, entry, file.Name, fullPath, d.relativeSymlinksEnabled())
 						if linkErr != nil {
 							_ = directory.Close()
 							return fmt.Errorf(
@@ -1079,8 +1097,6 @@ func (d *Downloader) processUsenetDownload(ctx context.Context, entry *storage.E
 	err := p.Wait()
 
 	if err != nil {
-		entry.MarkAsError(err)
-		_ = d.manager.queue.Update(entry)
 		return fmt.Errorf("NZB download failed: %w", err)
 	}
 
@@ -1103,6 +1119,14 @@ func (d *Downloader) prepareUsenetDownloadDirectory(entry *storage.Entry) (strin
 func (d *Downloader) processStrm(ctx context.Context, torrent *storage.Entry) error {
 	if err := ctx.Err(); err != nil {
 		return err
+	}
+	streamSource := torrent
+	if torrent.SeasonSource != nil || torrent.FileScopeRestricted {
+		source, err := d.manager.seasonSource(torrent)
+		if err != nil {
+			return err
+		}
+		streamSource = source
 	}
 	files := torrent.GetActiveFiles()
 	d.logger.Info().Msgf("Creating .strm for %d files ...", len(files))
@@ -1155,7 +1179,7 @@ func (d *Downloader) processStrm(ctx context.Context, torrent *storage.Entry) er
 			}
 			strmFilePath = safePath
 		}
-		streamURL, err := torrentSTRMURL(d.strmURL, torrent, file)
+		streamURL, err := torrentSTRMURL(d.strmURL, streamSource, file)
 		if err != nil {
 			continue
 		}
@@ -1233,6 +1257,7 @@ func (d *Downloader) detectMultiSeason(torrent *storage.Entry) (bool, []SeasonIn
 	if len(seasons) <= 1 {
 		return false, nil
 	}
+	sort.Slice(seasons, func(i, j int) bool { return seasons[i].SeasonNumber < seasons[j].SeasonNumber })
 
 	d.logger.Info().Msgf("Multi-season torrent detected with seasons: %v", getSortedSeasons(seasonsFound))
 

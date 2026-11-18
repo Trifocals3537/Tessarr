@@ -108,7 +108,7 @@ func (p *NZBParser) Parse(ctx context.Context, filename string, content []byte) 
 	// Parse raw XML
 	raw, err := nzbparser.Parse(bytes.NewReader(content))
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to parse NZB content: %w", err)
+		return nil, nil, fmt.Errorf("failed to parse NZB content: %w", NewInvalidNZBError(err))
 	}
 
 	// Create base NZB structure
@@ -313,12 +313,11 @@ func (p *NZBParser) groupFiles(ctx context.Context, files nzbparser.NzbFiles) (m
 
 	groups := p.groupProcessedFiles(allFiles)
 
-	// Merge obfuscated RAR groups - when subjects are random strings,
-	// each RAR volume gets its own group. This merges them back together.
-	groups = p.mergeObfuscatedRarGroups(groups)
-
 	if len(groups) == 0 {
-		return groups, detectionFailures.unavailableError()
+		if unavailable := detectionFailures.unavailableError(); unavailable != nil {
+			return groups, unavailable
+		}
+		return groups, detectionFailures.rejectionError()
 	}
 	return groups, nil
 }
@@ -364,77 +363,6 @@ func (p *NZBParser) filterUnavailableUnknownFiles(
 		}
 	}
 	return available, failures, nil
-}
-
-// mergeObfuscatedRarGroups detects and merges RAR FileGroups that likely belong
-// to the same multi-volume archive but couldn't be grouped due to obfuscated
-// subjects/filenames.
-//
-// Obfuscation detection: When an NZB has random subjects (e.g., "yXIBWWn7qKVUVpS6")
-// instead of descriptive filenames (e.g., "movie.part01.rar"), each RAR volume
-// ends up in its own single-file group. This function merges those back together.
-func (p *NZBParser) mergeObfuscatedRarGroups(groups map[string]*FileGroup) map[string]*FileGroup {
-	// Collect all single-file RAR groups (potential obfuscation victims)
-	var singleFileRarGroups []*FileGroup
-	var otherGroups []*FileGroup
-
-	for _, group := range groups {
-		if group.Type == storage.NZBFileTypeRar && len(group.Files) == 1 {
-			singleFileRarGroups = append(singleFileRarGroups, group)
-		} else {
-			otherGroups = append(otherGroups, group)
-		}
-	}
-
-	// If we have multiple single-file RAR groups, this is likely obfuscation
-	// Merge them into a single group
-	if len(singleFileRarGroups) > 1 {
-		p.logger.Debug().
-			Int("single_file_rar_groups", len(singleFileRarGroups)).
-			Msg("Detected potential obfuscated RAR archive, merging groups")
-
-		// Create a merged group using the first group as base
-		mergedGroup := &FileGroup{
-			BaseName:       singleFileRarGroups[0].BaseName,
-			ActualFilename: singleFileRarGroups[0].ActualFilename,
-			Type:           storage.NZBFileTypeRar,
-			Files:          make([]nzbparser.NzbFile, 0, len(singleFileRarGroups)),
-			Groups:         make(map[string]struct{}),
-		}
-
-		// Merge all files from single-file RAR groups
-		for _, group := range singleFileRarGroups {
-			mergedGroup.Files = append(mergedGroup.Files, group.Files...)
-			for g := range group.Groups {
-				mergedGroup.Groups[g] = struct{}{}
-			}
-		}
-
-		// Sort merged files by their NZB file Number (index in original NZB)
-		// This preserves upload order which typically matches volume order
-		// for multi-volume RAR archives uploaded sequentially
-		sort.Slice(mergedGroup.Files, func(i, j int) bool {
-			// Use the NZB file Number field which represents order in NZB
-			return mergedGroup.Files[i].Number < mergedGroup.Files[j].Number
-		})
-
-		// Rebuild the groups map with the merged group
-		result := make(map[string]*FileGroup)
-		result[mergedGroup.BaseName] = mergedGroup
-		for _, group := range otherGroups {
-			result[group.BaseName] = group
-		}
-
-		p.logger.Info().
-			Int("merged_files", len(mergedGroup.Files)).
-			Str("group_name", mergedGroup.BaseName).
-			Msg("Merged obfuscated RAR groups into single group")
-
-		return result
-	}
-
-	// No merging needed
-	return groups
 }
 
 // Batch process unknown files in parallel
@@ -664,32 +592,37 @@ func (p *NZBParser) processFileGroups(ctx context.Context, groups map[string]*Fi
 		}
 		fileGroups = append(fileGroups, *g)
 	}
+	// Stable group numbers let bounded diagnostics refer to existing warnings
+	// without copying private release/member names into the new message.
+	sort.Slice(fileGroups, func(i, j int) bool { return fileGroups[i].BaseName < fileGroups[j].BaseName })
 
 	// Use a Mapper with limited concurrency to prevent goroutine explosion
 	// when nested with RAR/archive parsers that also use parallel processing
-	type groupResult struct {
-		files []*storage.NZBFile
-		err   error
-	}
-	mapper := iter.Mapper[FileGroup, groupResult]{
+	mapper := iter.Mapper[FileGroup, fileGroupResult]{
 		MaxGoroutines: p.maxConcurrent,
 	}
 
-	results := mapper.Map(fileGroups, func(g *FileGroup) groupResult {
+	results := mapper.Map(fileGroups, func(g *FileGroup) fileGroupResult {
 		files, err := p.processFileGroup(ctx, g, password)
 		if err != nil {
-			p.logger.Warn().Err(err).Str("group", g.BaseName).Msg("Failed to process file group")
-			return groupResult{err: err}
+			return fileGroupResult{err: err}
 		}
-		return groupResult{files: files}
+		return fileGroupResult{files: files}
 	})
+	fallbackErrors := p.assembleIncompleteRARGroups(ctx, fileGroups, results, password)
 
 	// Filter nils
 	var files []storage.NZBFile
 	var failures []error
-	for _, result := range results {
+	var rarFailures []rarGroupFailure
+	for index, result := range results {
 		if result.err != nil {
+			group := &fileGroups[index]
+			p.logger.Warn().Err(result.err).Str("group", group.BaseName).Int("group_index", index+1).Msg("Failed to process file group")
 			failures = append(failures, result.err)
+			if group.Type == storage.NZBFileTypeRar && len(rarFailures) < maxRARDiagnosticGroups {
+				rarFailures = append(rarFailures, rarGroupFailure{index: index + 1, group: group, err: result.err})
+			}
 		}
 		for _, f := range result.files {
 			if f != nil {
@@ -707,6 +640,11 @@ func (p *NZBParser) processFileGroups(ctx context.Context, groups map[string]*Fi
 				}
 			}
 		}
+	}
+	failures = append(failures, fallbackErrors...)
+	for _, hint := range rarGroupDiagnostics(rarFailures) {
+		p.logger.Warn().Msg(hint.Error())
+		failures = append(failures, hint)
 	}
 
 	// Count deferred archives

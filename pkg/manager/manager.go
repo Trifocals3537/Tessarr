@@ -38,20 +38,21 @@ import (
 
 // Manager handles unified torrent management - replaces wire.Store completely
 type Manager struct {
-	workflowFault   atomic.Pointer[workflowFault]
-	storage         *storage.Storage
-	migrator        *Migrator
-	repair          *Repair
-	clients         *xsync.Map[string, debrid.Client]
-	arr             *arr.Storage
-	logger          zerolog.Logger
-	ready           chan struct{}
-	readyOnce       sync.Once
-	lifecycle       atomic.Pointer[lifecycleSnapshot]
-	streamClient    *http.Client
-	streamWait      func(context.Context, time.Duration) error
-	cdnTraffic      *cdntraffic.Governor
-	providerTraffic *providertraffic.Controller
+	cleanupPhaseForTest func(string)
+	workflowFault       atomic.Pointer[workflowFault]
+	storage             *storage.Storage
+	migrator            *Migrator
+	repair              *Repair
+	clients             *xsync.Map[string, debrid.Client]
+	arr                 *arr.Storage
+	logger              zerolog.Logger
+	ready               chan struct{}
+	readyOnce           sync.Once
+	lifecycle           atomic.Pointer[lifecycleSnapshot]
+	streamClient        *http.Client
+	streamWait          func(context.Context, time.Duration) error
+	cdnTraffic          *cdntraffic.Governor
+	providerTraffic     *providertraffic.Controller
 
 	// Migration jobs tracking
 	migrationJobs             *xsync.Map[string, *storage.SwitcherJob]
@@ -152,6 +153,7 @@ type Manager struct {
 	submissionRejections        *submissionRejectionCache
 	submissionContentRejections atomic.Uint64
 	submissionRejectionHits     atomic.Uint64
+	nzbAdmissionMetrics         nzbAdmissionMetrics
 
 	// In-flight queue-processor dispatches, keyed by InfoHash, to prevent
 	// duplicate goroutines from processing the same entry when the scheduler
@@ -325,7 +327,7 @@ func (m *Manager) startEntryBackground(parent context.Context, name string, entr
 			if outcome.Kind == workflow.Panicked {
 				m.logger.Error().Str("task", name).Bytes("stack", outcome.Stack).Msg("Scheduled workflow panicked")
 			}
-			if workErr != nil && lease.Context().Err() == nil && outcome.Kind != workflow.Canceled && !errors.Is(workErr, errDeleteQueueEntryOnJobFinish) {
+			if workErr != nil && lease.Context().Err() == nil && outcome.Kind != workflow.Canceled && !errors.Is(workErr, errDeleteQueueEntryOnJobFinish) && !isNZBFinalizationError(workErr) {
 				_ = m.commitJobOutcome(&Job{Entry: entry}, storage.QueueOutcome{Kind: storage.QueueOutcomeFailed, Err: workErr})
 			}
 		}()
@@ -339,7 +341,7 @@ func (m *Manager) startEntryBackground(parent context.Context, name string, entr
 			}
 			return
 		}
-		if workErr != nil && !errors.Is(workErr, context.Canceled) {
+		if workErr != nil && !errors.Is(workErr, context.Canceled) && !isNZBFinalizationError(workErr) {
 			m.logger.Error().
 				Err(workErr).
 				Str("task", name).
@@ -618,6 +620,9 @@ func (m *Manager) processJob(ctx context.Context, job *Job) {
 		return
 	}
 	if err := outcome.Err; err != nil {
+		if isNZBFinalizationError(err) {
+			return // The finalizer already published or deliberately preserved its outcome.
+		}
 		if errors.Is(err, errDeleteQueueEntryOnJobFinish) {
 			job.DeleteOnFinish = true
 			return
@@ -772,6 +777,8 @@ func (m *Manager) Start(ctx context.Context) error {
 		m.setLifecyclePhase(LifecyclePhaseFailed, "manager workers failed to start")
 		return fmt.Errorf("failed to start manager worker: %w", err)
 	}
+
+	m.startCleanupWorkflows()
 
 	// Start the mount manager if set
 	// This also start thr mounting process
@@ -1045,7 +1052,7 @@ func (m *Manager) GetTorrentsCount() (int, error) {
 
 // DeleteEntry deletes a torrent by infohash
 func (m *Manager) DeleteEntry(infohash string, removePlacements bool) error {
-	return m.deleteMainEntryWithCleanup(infohash, func(mainEntry *storage.Entry) error {
+	err := m.deleteMainEntryWithCleanup(infohash, func(mainEntry *storage.Entry) error {
 		if removePlacements {
 			if err := m.storage.PrepareMainDeletionPlacements(mainEntry); err != nil {
 				return err
@@ -1067,9 +1074,18 @@ func (m *Manager) DeleteEntry(infohash string, removePlacements bool) error {
 		}
 		return nil
 	})
+	if removePlacements && storage.IsEntryNotFound(err) && m.queue != nil {
+		if handled, retryErr := m.retryAdoptedAdministrativeCleanup(infohash); handled {
+			return retryErr
+		}
+	}
+	return err
 }
 
 func (m *Manager) deleteAdministrativeQueueAndMainPlacements(infohash string, mainEntry *storage.Entry) error {
+	if handled, err := m.retryAdoptedAdministrativeCleanup(infohash); handled {
+		return err
+	}
 	mainFinished := false
 	_, err := m.queue.deleteWithPreparation(infohash, func(entry *storage.Entry) error { return m.RemoveTorrentPlacements(entry) }, true, func() (*storage.QueueDeletionIntent, error) {
 		return m.queue.storage.PrepareQueuedDeletion(infohash, true, mainEntry)
@@ -1178,6 +1194,9 @@ func (m *Manager) DeleteQueueEntry(infohash string, removePlacements bool) error
 
 	// An authoritative main miss still permits queue-only deletion. Any
 	// indeterminate main lookup error returned above fails closed.
+	if handled, err := m.retryAdoptedAdministrativeCleanup(infohash); handled {
+		return err
+	}
 	_, queueErr := m.queue.deleteWithResult(infohash, func(queued *storage.Entry) error {
 		return m.RemoveTorrentPlacements(queued)
 	})

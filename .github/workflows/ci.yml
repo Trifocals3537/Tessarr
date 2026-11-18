@@ -35,7 +35,7 @@ jobs:
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
-      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
           cache: true
@@ -46,7 +46,32 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y libfuse-dev
 
       - name: Run tests
+        if: runner.os != 'Windows'
         run: go test -count=1 ./...
+
+      - name: Run Windows tests with structured failure evidence
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path diagnostics -Force | Out-Null
+          go version | Set-Content diagnostics/toolchain.txt
+          go env GOOS GOARCH CGO_ENABLED GOVERSION GOEXPERIMENT | Add-Content diagnostics/toolchain.txt
+          try {
+            ./scripts/windows-exception-probe/context.ps1 > diagnostics/host-context.json
+          } catch {
+            '{"context":"unavailable"}' | Set-Content diagnostics/host-context.json
+          }
+          go test -json -count=1 ./... 2>&1 | Tee-Object -FilePath diagnostics/windows-tests.jsonl
+          exit $LASTEXITCODE
+
+      - name: Retain Windows failure diagnostics
+        if: failure() && runner.os == 'Windows'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: windows-test-failure-${{ github.sha }}
+          path: diagnostics/
+          if-no-files-found: error
+          retention-days: 7
 
   native:
     name: Native Linux build
@@ -54,7 +79,7 @@ jobs:
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
-      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
           cache: true
@@ -107,7 +132,7 @@ jobs:
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
-      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
           cache: true
@@ -178,7 +203,7 @@ jobs:
             -C dist tessarr tessarr.service LICENSE
 
       - name: Upload candidate
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: seedbox-linux-amd64-candidate
           path: dist/tessarr_seedbox_Linux_x86_64.tar.gz

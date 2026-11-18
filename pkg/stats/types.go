@@ -18,6 +18,7 @@ type Snapshot struct {
 	StreamFailover   manager.StreamFailoverStats   `json:"stream_failover"`
 	StreamSessions   manager.StreamSessionStats    `json:"stream_sessions"`
 	TorrentAdmission manager.TorrentAdmissionStats `json:"torrent_admission"`
+	NZBAdmission     manager.NZBAdmissionStats     `json:"nzb_admission"`
 	Storage          StorageStats                  `json:"storage"`
 	Queue            QueueStats                    `json:"queue"`
 	Arrs             ArrStats                      `json:"arrs"`

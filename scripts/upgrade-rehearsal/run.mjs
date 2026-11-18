@@ -327,7 +327,8 @@ try {
   assert.equal((await assertCompleted(stableID)).nzb_name ?? title, title);
   const resumed = await assertCompleted(queuedID);
   assert.equal((await slots('queue')).some(row => row.nzo_id === queuedID), false);
-  const finishedFile = await realpath(path.join(resumed.storage, 'queued.bin'));
+  // A one-file release uses the release title and the original extension.
+  const finishedFile = await realpath(path.join(resumed.storage, queuedName + '.bin'));
   assert(finishedFile.startsWith(downloads + path.sep), 'completed file escaped the fixture download root');
   assert((await readFile(finishedFile)).equals(queuedData), 'resumed download bytes differ');
   report('Candidate resumed the v2.6.4 queue entry once and wrote the expected bytes');

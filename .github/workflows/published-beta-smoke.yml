@@ -1,0 +1,94 @@
+name: Published beta smoke test
+
+on:
+  push:
+    branches:
+      - gitsune/verify-published-beta-4ca076e
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    name: Start published image (linux/${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 5
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    env:
+      IMAGE: ghcr.io/trifocals3537/tessarr@sha256:f4b39410210b392940b61da57c263b2909aafbb556c0d103f441aa7f9eac7106
+      VERSION: 2.7.0-beta.44238902601.4ca076e
+      PLATFORM: linux/${{ matrix.arch }}
+    steps:
+      - name: Pull, validate and start the published digest
+        shell: bash
+        run: |
+          set -euo pipefail
+          container=tessarr-beta-smoke
+          fixture="$(mktemp -d)"
+          trap 'docker rm -fv "$container" >/dev/null 2>&1 || true' EXIT
+
+          cat > "$fixture/config.json" <<'JSON'
+          {
+            "port": "8282",
+            "download_folder": "/app/downloads",
+            "disable_webdav": true,
+            "mount": {"type": "none"},
+            "usenet": {
+              "max_connections": 1,
+              "processing_max_connections": 1,
+              "providers": [{
+                "host": "127.0.0.1",
+                "port": 119,
+                "username": "fixture",
+                "password": "fixture",
+                "max_connections": 1
+              }]
+            }
+          }
+          JSON
+          chmod 755 "$fixture"
+          chmod 644 "$fixture/config.json"
+
+          docker pull --platform "$PLATFORM" "$IMAGE"
+          validation="$(docker run --rm --network none --platform "$PLATFORM" \
+            --env TESSARR_BIND_ADDRESS=127.0.0.1 \
+            --mount "type=bind,src=$fixture,dst=/fixture,readonly" \
+            "$IMAGE" /usr/bin/tessarr --config /fixture --check-config)"
+          grep -F 'Tessarr configuration is valid' <<< "$validation"
+
+          docker create --name "$container" --network none --platform "$PLATFORM" \
+            --env TESSARR_BIND_ADDRESS=127.0.0.1 "$IMAGE"
+          docker cp "$fixture/config.json" "$container:/app/config.json"
+          docker start "$container"
+
+          readiness=''
+          for attempt in {1..35}; do
+            if readiness="$(docker exec "$container" wget -qO- -T 2 http://127.0.0.1:8282/ready 2>/dev/null)"; then
+              break
+            fi
+            if [[ "$(docker inspect --format '{{.State.Running}}' "$container")" != true ]]; then
+              break
+            fi
+            sleep 1
+          done
+          if ! jq -e '.ready and .phase == "ready"' <<< "${readiness:-null}"; then
+            docker logs --tail 50 "$container"
+            exit 1
+          fi
+          docker exec "$container" wget -qO- -T 2 http://127.0.0.1:8282/live \
+            | jq -e '.status == "live"'
+          docker exec "$container" wget -qO- -T 2 http://127.0.0.1:8282/version \
+            | jq -e --arg version "$VERSION" '.version == $version and .channel == "beta"'
+          docker exec "$container" /container-defaults.sh /usr/bin/healthcheck --config /app --debug
+          docker stop --time 45 "$container"
+          test "$(docker inspect --format '{{.State.ExitCode}}' "$container")" = 0
+          logs="$(docker logs "$container" 2>&1)"
+          grep -F 'Tessarr has been stopped gracefully.' <<< "$logs"
+          echo "$PLATFORM passed startup, liveness, readiness, version, health and shutdown checks."

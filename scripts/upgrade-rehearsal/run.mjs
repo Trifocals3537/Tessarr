@@ -311,7 +311,12 @@ try {
   const title = stableRow.nzb_name ?? stableRow.name ?? firstName;
   await assertRange(title, 'fileA.bin', original, 250, 1000);
   report('v2.6.4 imported and served byte-exact media from a generated NZB');
+  assert.equal((await slots('queue')).length, 0);
+  await stop();
+  await cp(state, checkpoint, { recursive: true, errorOnExist: true, force: false });
+  report('Saved a pre-upgrade rollback checkpoint with the queue idle');
 
+  await start(stableExe, 'stable-queue', '2.6.4');
   const queuedArticle = 'queued.bin-6@upgrade.invalid';
   blocked.add(queuedArticle);
   const queuedID = await addNZB(queuedName, queuedNZB);
@@ -319,9 +324,8 @@ try {
   const active = (await slots('queue')).filter(row => row.nzo_id === queuedID);
   assert.equal(active.length, 1, 'expected one active job before upgrade');
   await stop(true);
-  await cp(state, checkpoint, { recursive: true, errorOnExist: true, force: false });
   blocked.clear();
-  report('Stopped v2.6.4 during an active file download and copied its persisted state');
+  report('Stopped v2.6.4 during an active file download for the in-place upgrade');
 
   await start(betaExe, 'candidate', betaVersion);
   assert.equal((await assertCompleted(stableID)).nzb_name ?? title, title);
@@ -384,12 +388,13 @@ try {
   missing.clear();
   await start(stableExe, 'rollback', '2.6.4');
   await assertCompleted(stableID);
-  await assertCompleted(queuedID);
+  assert.equal((await slots('queue')).length, 0);
+  assert.equal((await slots('history')).some(row => row.nzo_id === queuedID), false);
   await assertRange(title, 'fileA.bin', original, 0, 511);
-  report('Restored the pre-upgrade checkpoint and verified v2.6.4 readiness, queue and playback');
+  report('Restored the idle checkpoint and verified v2.6.4 readiness, authentication and playback');
   await writeFile(path.join(scratch, 'result.json'), JSON.stringify({ stable: '2.6.4', candidate: betaVersion, stages }, null, 2));
 } catch (error) {
-  for (const label of ['stable', 'candidate', 'par2-start', 'par2-resume', 'candidate-restart', 'rollback']) {
+  for (const label of ['stable', 'stable-queue', 'candidate', 'par2-start', 'par2-resume', 'candidate-restart', 'rollback']) {
     const appLog = await readFile(path.join(root, label + '.log'), 'utf8').catch(() => '');
     if (appLog) console.error(label + ' log tail:\n' + appLog.trim().split('\n').slice(-24).join('\n'));
   }

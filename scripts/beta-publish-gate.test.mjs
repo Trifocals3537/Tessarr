@@ -5,12 +5,12 @@ import {githubReader, main, requiredJobs, validateBeta} from './beta-publish-gat
 const sha = 'a'.repeat(40);
 function fixture() {
     const env = {
-        GITHUB_EVENT_NAME: 'workflow_dispatch', GITHUB_REPOSITORY: 'Trifocals3537/tessarr',
+        GITHUB_EVENT_NAME: 'workflow_dispatch', GITHUB_REPOSITORY: 'Trifocals3537/Tessarr',
         GITHUB_REPOSITORY_ID: '1426317456', GITHUB_REF: 'refs/heads/beta', GITHUB_SHA: sha,
         GITHUB_RUN_ATTEMPT: '1', BETA_MODE: 'validate', BETA_EXPECTED_SHA: sha, BETA_CI_RUN_ID: '42',
     };
     const run = {id: 42, workflow_id: 7, path: '.github/workflows/ci.yml',
-        repository: {id: 1426317456, full_name: 'Trifocals3537/tessarr'}, head_repository: {id: 1426317456},
+        repository: {id: 1426317456, full_name: 'Trifocals3537/Tessarr'}, head_repository: {id: 1426317456},
         head_branch: 'beta', head_sha: sha, event: 'push', status: 'completed', conclusion: 'success', run_attempt: 1};
     const jobs = requiredJobs.map((name, index) => ({id: index + 1, name, run_id: 42,
         run_attempt: 1, head_sha: sha, status: 'completed', conclusion: 'success'}));
@@ -41,6 +41,13 @@ for (const mode of ['validate', 'build', 'publish']) {
     });
 }
 
+test('recognizes the same repository across case-only name changes', async () => {
+    const state = fixture();
+    state.env.GITHUB_REPOSITORY = 'Trifocals3537/tessarr';
+    state.run.repository.full_name = 'trifocals3537/TESSARR';
+    assert.deepEqual(await validateBeta(state.env, state.read), {sha, runId: 42, attempt: 1});
+});
+
 for (const [key, value] of [
     ['GITHUB_EVENT_NAME', 'push'], ['GITHUB_REPOSITORY', 'fork/tessarr'], ['GITHUB_REPOSITORY_ID', '1'],
     ['GITHUB_REF', 'refs/heads/main'], ['GITHUB_REF', 'refs/tags/beta'], ['GITHUB_SHA', 'b'.repeat(40)],
@@ -65,7 +72,9 @@ test('publishing cannot be repeated by rerunning an old request', async () => {
 
 for (const [key, value] of [
     ['id', 41], ['workflow_id', 9], ['path', '.github/workflows/release.yml'],
-    ['repository', {id: 1}], ['head_repository', {id: 1}], ['head_branch', 'main'], ['head_sha', 'b'.repeat(40)],
+    ['repository', {id: 1, full_name: 'Trifocals3537/Tessarr'}],
+    ['repository', {id: 1426317456, full_name: 'fork/Tessarr'}],
+    ['head_repository', {id: 1}], ['head_branch', 'main'], ['head_sha', 'b'.repeat(40)],
     ['event', 'pull_request'], ['event', 'pull_request_target'], ['status', 'in_progress'],
     ['conclusion', 'failure'], ['conclusion', 'skipped'], ['conclusion', 'cancelled'], ['run_attempt', 0],
 ]) {
@@ -140,7 +149,7 @@ for (const mutate of [
 
 test('API reader fails closed and never follows a token-bearing redirect', async () => {
     const read = githubReader('synthetic-token', async (url, options) => {
-        assert.equal(url, 'https://api.github.com/repos/Trifocals3537/tessarr/branches/beta');
+        assert.equal(url, 'https://api.github.com/repos/Trifocals3537/Tessarr/branches/beta');
         assert.equal(options.redirect, 'error');
         assert.equal(options.headers.Authorization, 'Bearer synthetic-token');
         return {ok: false, status: 403};

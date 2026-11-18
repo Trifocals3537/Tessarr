@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: Release tag, for example v2.6.0 or v2.6.0-beta.1
+        description: Release tag, for example v2.7.0 or v2.7.0-beta.1
         required: true
         type: string
       expected_sha:

@@ -2,9 +2,27 @@
 
 Notable user-facing Tessarr changes are documented here.
 
-## 2.6.0 - Unreleased
+## 2.7.0 - Unreleased
 
-This will be the first stable Tessarr release. It establishes an independent
+### Usenet and playback
+
+- Added manual PAR2 recovery for existing plain-file NZBs. Recovered ranges
+  stay available for playback after a restart.
+- Made Usenet completion safe to resume after an interruption and kept it
+  under one owner.
+- Fixed short reads at the end of files and improved handling of mixed RAR
+  volumes and independent archives in the same NZB.
+
+### Upgrade notes
+
+- Back up the data directory before upgrading from 2.6.4. Verify that existing
+  imports can still be read and that interrupted jobs resume after startup.
+- Continuous beta builds use `2.7.0-beta.RUN_ID.SHA`. The `beta` channel is
+  updated through the guarded publishing workflow.
+
+## 2.6.0
+
+This was the first stable Tessarr release. It established an independent
 product identity while preserving compatible configuration, provider mappings,
 and library paths for existing installations.
 
@@ -62,6 +80,6 @@ and library paths for existing installations.
   copy and verify state without modifying their current installation.
 - Preview container deployments should use
   `ghcr.io/trifocals3537/tessarr:beta`. The `latest` tag is reserved for the
-  stable release and should not be used until 2.6.0 is published.
+  stable release channel.
 - Back up the configuration directory before upgrading. Verify the mount and
   real media reads before retiring the previous binary or image.

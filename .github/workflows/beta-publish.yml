@@ -30,7 +30,7 @@ concurrency:
 
 env:
   GHCR_IMAGE: ghcr.io/trifocals3537/tessarr
-  BETA_VERSION_BASE: "2.6.0"
+  BETA_VERSION_BASE: "2.7.0"
 
 jobs:
   validate:

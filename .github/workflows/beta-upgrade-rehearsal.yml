@@ -1,0 +1,65 @@
+name: Tessarr 2.7.0 upgrade rehearsal
+
+on:
+  push:
+    branches: ['gitsune/verify-2.7.0-upgrade']
+
+permissions:
+  contents: read
+
+jobs:
+  upgrade:
+    name: Rehearse upgrading v2.6.4 to beta
+    runs-on: ubuntu-24.04
+    timeout-minutes: 16
+    env:
+      TESSARR_REVISION: c5d9a2603ed5945741c3d356eab65e60c010ca06
+      CGO_ENABLED: '0'
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: c5d9a2603ed5945741c3d356eab65e60c010ca06
+          path: candidate
+          persist-credentials: false
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: candidate/go.mod
+          cache-dependency-path: candidate/go.sum
+
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: '22'
+
+      - name: Verify the release, build the candidate, and rehearse an upgrade
+        shell: bash
+        run: |
+          set -euo pipefail
+          scratch="$(mktemp -d "$RUNNER_TEMP/tessarr-upgrade.XXXXXX")"
+          mkdir "$scratch/stable" "$scratch/empty-ca-directory"
+          archive="$scratch/v2.6.4.tar.gz"
+          curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' \
+            --output "$archive" \
+            'https://github.com/Trifocals3537/Tessarr/releases/download/v2.6.4/tessarr_Linux_x86_64.tar.gz'
+          printf '0a2847e5e5579e7c64d650b69184786a9bed2afbe8801985789f7d960c622834  %s\n' "$archive" \
+            | sha256sum --check --strict
+          tar -xzf "$archive" -C "$scratch/stable" tessarr
+
+          openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -noenc -days 1 \
+            -subj '/CN=Tessarr Synthetic NNTP' -addext 'subjectAltName = IP:127.0.0.1' \
+            -keyout "$scratch/fixture-tls.key" -out "$scratch/fixture-tls.pem"
+          test "$(git -C candidate rev-parse HEAD)" = "$TESSARR_REVISION"
+          version="2.7.0-beta.0.${TESSARR_REVISION:0:7}"
+          version_package='github.com/Trifocals3537/tessarr/pkg/version'
+          (
+            cd candidate
+            go build -trimpath -ldflags "-X $version_package.Version=$version -X $version_package.Channel=beta" \
+              -o "$scratch/tessarr" .
+            go run ../scripts/upgrade-rehearsal/password.go "$scratch/fixture-password.hash"
+          )
+          node scripts/upgrade-rehearsal/run.mjs "$scratch" "$PWD/candidate" \
+            "$scratch/stable/tessarr" "$scratch/tessarr" "$version"

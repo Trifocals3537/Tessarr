@@ -132,7 +132,7 @@ func countMediaPaths(paths []string) int {
 	return count
 }
 
-func (m *Manager) verifyImportReadiness(ctx context.Context, infoHash string, files []importReadinessFile) error {
+func (m *Manager) verifyImportReadiness(ctx context.Context, entry *storage.Entry, files []importReadinessFile) error {
 	if len(files) == 0 {
 		return nil
 	}
@@ -150,7 +150,7 @@ func (m *Manager) verifyImportReadiness(ctx context.Context, infoHash string, fi
 		return ErrCacheWarmUnavailable
 	}
 
-	before, err := m.GetEntry(infoHash)
+	before, err := m.importReadinessSource(entry)
 	if err != nil {
 		return fmt.Errorf("load import target: %w", err)
 	}
@@ -191,7 +191,7 @@ func (m *Manager) verifyImportReadiness(ctx context.Context, infoHash string, fi
 		return err
 	}
 
-	after, err := m.GetEntry(infoHash)
+	after, err := m.importReadinessSource(entry)
 	if err != nil {
 		return fmt.Errorf("reload import target: %w", err)
 	}
@@ -205,7 +205,20 @@ func (m *Manager) verifyImportReadiness(ctx context.Context, infoHash string, fi
 	if beforeFingerprint != afterFingerprint {
 		return errors.New("provider target changed during import readiness verification")
 	}
+	if entry.SeasonSource != nil && before.MainGeneration != after.MainGeneration {
+		return errors.New("season source changed during import readiness verification")
+	}
 	return nil
+}
+
+func (m *Manager) importReadinessSource(entry *storage.Entry) (*storage.Entry, error) {
+	if entry == nil {
+		return nil, errors.New("import entry is nil")
+	}
+	if entry.SeasonSource != nil || entry.FileScopeRestricted {
+		return m.seasonSource(entry)
+	}
+	return m.GetEntry(entry.InfoHash)
 }
 
 func verifyImportReadinessFile(ctx context.Context, opener CacheWarmOpener, file importReadinessFile) (err error) {

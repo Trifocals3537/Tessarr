@@ -35,6 +35,11 @@ func resolveSymlinkTarget(linkPath, target string) (string, error) {
 	if target == "" {
 		return "", fmt.Errorf("symlink target is empty")
 	}
+	// Cleaning hop/../file can change its meaning when hop is a symlink.
+	// Our writer already produces clean targets, including leading ../ paths.
+	if filepath.Clean(target) != target {
+		return "", fmt.Errorf("symlink target is not clean: %q", target)
+	}
 	if filepath.IsAbs(target) {
 		return filepath.Clean(target), nil
 	}

@@ -169,7 +169,7 @@ func TestVerifyImportReadinessChecksSizeAndHeadMiddleTail(t *testing.T) {
 	const size = int64(1024 * 1024)
 	manager, file := readinessTestManager(t, size)
 	probe := importReadinessFile{path: "movie.mkv", logicalName: "movie.mkv", expectedSize: size}
-	if err := manager.verifyImportReadiness(context.Background(), "readiness-hash", []importReadinessFile{probe}); err != nil {
+	if err := manager.verifyImportReadiness(context.Background(), &storage.Entry{InfoHash: "readiness-hash"}, []importReadinessFile{probe}); err != nil {
 		t.Fatal(err)
 	}
 	want := importReadinessOffsets(size, importReadinessProbeSize)
@@ -180,7 +180,7 @@ func TestVerifyImportReadinessChecksSizeAndHeadMiddleTail(t *testing.T) {
 
 func TestVerifyImportReadinessRejectsSizeMismatch(t *testing.T) {
 	manager, _ := readinessTestManager(t, 1024)
-	err := manager.verifyImportReadiness(context.Background(), "readiness-hash", []importReadinessFile{{
+	err := manager.verifyImportReadiness(context.Background(), &storage.Entry{InfoHash: "readiness-hash"}, []importReadinessFile{{
 		path:         "movie.mkv",
 		logicalName:  "movie.mkv",
 		expectedSize: 2048,
@@ -193,7 +193,7 @@ func TestVerifyImportReadinessRejectsSizeMismatch(t *testing.T) {
 func TestVerifyImportReadinessRejectsTruncatedRange(t *testing.T) {
 	manager, file := readinessTestManager(t, 1024)
 	file.shortRead = true
-	err := manager.verifyImportReadiness(context.Background(), "readiness-hash", []importReadinessFile{{
+	err := manager.verifyImportReadiness(context.Background(), &storage.Entry{InfoHash: "readiness-hash"}, []importReadinessFile{{
 		path:         "movie.mkv",
 		logicalName:  "movie.mkv",
 		expectedSize: 1024,
@@ -233,7 +233,7 @@ func TestVerifyImportReadinessRejectsProviderTargetChange(t *testing.T) {
 			return file, nil
 		},
 	}
-	err = manager.verifyImportReadiness(context.Background(), entry.InfoHash, []importReadinessFile{{
+	err = manager.verifyImportReadiness(context.Background(), entry, []importReadinessFile{{
 		path:         "movie.mkv",
 		logicalName:  "movie.mkv",
 		expectedSize: 1024,
@@ -246,7 +246,7 @@ func TestVerifyImportReadinessRejectsProviderTargetChange(t *testing.T) {
 func TestVerifyImportReadinessReportsUnsupportedMount(t *testing.T) {
 	manager, _ := readinessTestManager(t, 1024)
 	manager.mountManager = &unsupportedReadinessMount{}
-	err := manager.verifyImportReadiness(context.Background(), "readiness-hash", []importReadinessFile{{
+	err := manager.verifyImportReadiness(context.Background(), &storage.Entry{InfoHash: "readiness-hash"}, []importReadinessFile{{
 		path:         "movie.mkv",
 		logicalName:  "movie.mkv",
 		expectedSize: 1024,
@@ -277,7 +277,7 @@ func TestVerifyImportReadinessCancellationIsBounded(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() {
-		done <- manager.verifyImportReadiness(ctx, entry.InfoHash, []importReadinessFile{{
+		done <- manager.verifyImportReadiness(ctx, entry, []importReadinessFile{{
 			path: "movie.mkv", logicalName: "movie.mkv", expectedSize: 1024,
 		}})
 	}()
@@ -327,7 +327,7 @@ func TestVerifyImportReadinessIsolatesBadFileFromConcurrentHealthyProbe(t *testi
 			return file, nil
 		},
 	}
-	err = manager.verifyImportReadiness(context.Background(), entry.InfoHash, []importReadinessFile{
+	err = manager.verifyImportReadiness(context.Background(), entry, []importReadinessFile{
 		{path: "bad.mkv", logicalName: "bad.mkv", expectedSize: 1024},
 		{path: "good.mkv", logicalName: "good.mkv", expectedSize: 1024},
 	})
@@ -342,7 +342,7 @@ func TestVerifyImportReadinessIsolatesBadFileFromConcurrentHealthyProbe(t *testi
 func TestVerifyImportReadinessSmallFileUsesOneExactRange(t *testing.T) {
 	manager, file := readinessTestManager(t, 1024)
 	probe := importReadinessFile{path: "movie.mkv", logicalName: "movie.mkv", expectedSize: 1024}
-	if err := manager.verifyImportReadiness(context.Background(), "readiness-hash", []importReadinessFile{probe}); err != nil {
+	if err := manager.verifyImportReadiness(context.Background(), &storage.Entry{InfoHash: "readiness-hash"}, []importReadinessFile{probe}); err != nil {
 		t.Fatal(err)
 	}
 	if got := file.readOffsets(); !slices.Equal(got, []int64{0}) {

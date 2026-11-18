@@ -381,9 +381,11 @@ func TestCreateConnectionAuthenticatesOnlyAfterTrustedSTARTTLS(t *testing.T) {
 }
 
 func TestImplicitTLSHandshakeIsBounded(t *testing.T) {
-	originalTimeouts := timeouts
+	originalHandshakeTimeout := timeouts.HandshakeTimeout
 	timeouts.HandshakeTimeout = 100 * time.Millisecond
-	defer func() { timeouts = originalTimeouts }()
+	// Closed clients may still be starting their idle reaper, which reads a
+	// different field. Restore only the timeout this fixture actually changes.
+	defer func() { timeouts.HandshakeTimeout = originalHandshakeTimeout }()
 
 	listener, provider := localNNTPListener(t)
 	provider.SSL = true
@@ -418,9 +420,9 @@ func TestImplicitTLSHandshakeIsBounded(t *testing.T) {
 }
 
 func TestImplicitTLSHandshakeHonorsContextCancellation(t *testing.T) {
-	originalTimeouts := timeouts
+	originalHandshakeTimeout := timeouts.HandshakeTimeout
 	timeouts.HandshakeTimeout = 5 * time.Second
-	defer func() { timeouts = originalTimeouts }()
+	defer func() { timeouts.HandshakeTimeout = originalHandshakeTimeout }()
 
 	listener, provider := localNNTPListener(t)
 	provider.SSL = true

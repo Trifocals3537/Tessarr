@@ -7,6 +7,7 @@ import (
 	"errors"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -35,8 +36,15 @@ func TestLegacyProviderReadPanicsAreContained(t *testing.T) {
 	for _, list := range []bool{false, true} {
 		t.Run(map[bool]string{false: "get", true: "list"}[list], func(t *testing.T) {
 			provider := &legacyRecoveryProvider{routingTestClient: &routingTestClient{}}
-			provider.get = func(string) (*debridTypes.Torrent, error) { panic(unsafeRecoveryPanic{}) }
-			provider.list = func() ([]*debridTypes.Torrent, error) { panic(unsafeRecoveryPanic{}) }
+			var calls atomic.Int32
+			provider.get = func(string) (*debridTypes.Torrent, error) {
+				calls.Add(1)
+				panic(unsafeRecoveryPanic{})
+			}
+			provider.list = func() ([]*debridTypes.Torrent, error) {
+				calls.Add(1)
+				panic(unsafeRecoveryPanic{})
+			}
 			var err error
 			if list {
 				_, err = getProviderTorrents(t.Context(), provider)
@@ -45,6 +53,9 @@ func TestLegacyProviderReadPanicsAreContained(t *testing.T) {
 			}
 			if err != workflow.ErrPanicked {
 				t.Fatalf("provider panic was not sanitized: %v", err)
+			}
+			if got := calls.Load(); got != 1 {
+				t.Fatalf("provider panic fixture invoked %d times, want 1", got)
 			}
 		})
 	}
@@ -162,6 +173,10 @@ func TestSeasonChildRecoveryPollsOnlyItsPersistedFileScope(t *testing.T) {
 	parent := newTorrentQueueEntry(req, debridTypes.TorrentStatusDownloaded)
 	parent.Category = ""
 	if err := applyDebridTorrentToEntry(parent, remote); err != nil {
+		t.Fatal(err)
+	}
+	// Production persists the authoritative parent before season fan-out.
+	if err := m.storage.AddOrUpdate(parent); err != nil {
 		t.Fatal(err)
 	}
 	downloader := &Downloader{logger: zerolog.Nop()}

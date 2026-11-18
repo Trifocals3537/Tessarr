@@ -32,6 +32,7 @@ type entryLifecycleState struct {
 	generation uint64
 	deleting   bool
 	active     map[*entryWorkLease]struct{}
+	finalizing *entryWorkLease
 }
 
 type entryWorkLease struct {
@@ -252,6 +253,46 @@ func (l *entryLifecycle) startWork(parent context.Context, key string, generatio
 	return lease, nil
 }
 
+// startFinalization serializes file actions and their outcome for one queue
+// generation. Waiters are work leases too: deletion cancels and drains them
+// before the key can be reused. No lifecycle mutex is held while waiting or
+// doing I/O. A new process starts with no leases and resumes the durable row.
+func (l *entryLifecycle) startFinalization(parent context.Context, key string, generation uint64) (*entryWorkLease, error) {
+	lease, err := l.startWork(parent, key, generation)
+	if err != nil {
+		return nil, err
+	}
+	claimed := false
+	defer func() {
+		if !claimed {
+			lease.Close()
+		}
+	}()
+	for {
+		if err := lease.ctx.Err(); err != nil {
+			return nil, err
+		}
+		lease.state.mu.Lock()
+		if lease.state.deleting || lease.state.generation != generation {
+			lease.state.mu.Unlock()
+			return nil, ErrStaleQueueGeneration
+		}
+		owner := lease.state.finalizing
+		if owner == nil {
+			lease.state.finalizing = lease
+			claimed = true
+			lease.state.mu.Unlock()
+			return lease, nil
+		}
+		lease.state.mu.Unlock()
+		select {
+		case <-owner.done:
+		case <-lease.ctx.Done():
+			return nil, lease.ctx.Err()
+		}
+	}
+}
+
 func (w *entryWorkLease) Context() context.Context {
 	if w == nil || w.ctx == nil {
 		return context.Background()
@@ -266,6 +307,9 @@ func (w *entryWorkLease) Close() {
 	w.once.Do(func() {
 		w.cancel()
 		w.state.mu.Lock()
+		if w.state.finalizing == w {
+			w.state.finalizing = nil
+		}
 		delete(w.state.active, w)
 		close(w.done)
 		w.state.mu.Unlock()
@@ -276,6 +320,12 @@ func (w *entryWorkLease) Close() {
 // already registered is captured and canceled; work racing registration sees
 // the tombstone and is rejected.
 func (l *entryLifecycle) beginDelete(key string) (*entryDeleteLease, error) {
+	return l.beginDeleteChecked(key, nil)
+}
+
+// beginDeleteChecked validates durable ownership while the generation gate is
+// held, before canceling workers or removing pending jobs for that key.
+func (l *entryLifecycle) beginDeleteChecked(key string, check func() error) (*entryDeleteLease, error) {
 	state, err := l.stateFor(key, true)
 	if err != nil {
 		return nil, err
@@ -285,6 +335,11 @@ func (l *entryLifecycle) beginDelete(key string) (*entryDeleteLease, error) {
 	defer state.mu.Unlock()
 	if state.deleting {
 		return nil, fmt.Errorf("%w: %s", ErrQueueEntryDeleting, key)
+	}
+	if check != nil {
+		if err := check(); err != nil {
+			return nil, err
+		}
 	}
 	state.deleting = true
 

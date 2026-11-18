@@ -10,6 +10,7 @@ package reader
 
 import (
 	"context"
+	"io"
 	"sync/atomic"
 	"time"
 
@@ -101,6 +102,7 @@ func (s SegmentState) String() string {
 
 // Config holds configuration for StreamingReader.
 type Config struct {
+	RecoveredArticle func(context.Context, SegmentMeta, io.Writer) (bool, error)
 	// Pools shares the memory budget across readers in one service run. A nil
 	// value gives a standalone reader its own lifecycle-scoped pool.
 	Pools *Pools
@@ -167,6 +169,10 @@ func PrefetchAheadSegments(readAheadBytes int64, segments []SegmentMeta) int {
 
 // Option is a functional option for configuring StreamingReader.
 type Option func(*Config)
+
+func WithRecoveredArticle(fn func(context.Context, SegmentMeta, io.Writer) (bool, error)) Option {
+	return func(c *Config) { c.RecoveredArticle = fn }
+}
 
 // WithMaxDisk sets the maximum disk space for segment caching.
 func WithMaxDisk(bytes int64) Option {

@@ -94,6 +94,7 @@ type RARArchiveInfo struct {
 	IsDataEncrypted   bool   // File data is encrypted
 	EncryptionKey     []byte // AES-256 key derived from password (32 bytes)
 	Files             []*RARFileEntry
+	VolumeOrder       []int // Original volume descriptor positions in validated order.
 }
 
 // RARFileEntry represents a file within the RAR archive
@@ -160,12 +161,6 @@ func (p *RARParser) Process(ctx context.Context, group *FileGroup, password stri
 	filename := group.BaseName
 	filename = utils.RemoveInvalidChars(path.Base(filename))
 
-	// Build base segments and volume info
-	baseSegments, volumeInfos, _ := buildBaseSegments(group)
-	if len(baseSegments) == 0 {
-		return nil, fmt.Errorf("no base segments found for RAR volumes")
-	}
-
 	// Parse RAR archive to get file entries with volume parts
 	archiveInfo, err := p.parseArchive(ctx, volumes, password)
 	if err != nil {
@@ -175,6 +170,10 @@ func (p *RARParser) Process(ctx context.Context, group *FileGroup, password stri
 	// Check if archive has encrypted headers and we couldn't parse it
 	if archiveInfo.IsHeaderEncrypted && len(archiveInfo.Files) == 0 {
 		return nil, fmt.Errorf("RAR archive has encrypted headers; password required or incorrect")
+	}
+	baseSegments, volumeInfos, err := buildRARBaseSegments(volumes, archiveInfo.VolumeOrder)
+	if err != nil {
+		return nil, err
 	}
 
 	// Build volume offset map
@@ -274,6 +273,11 @@ func (p *RARParser) parseArchive(ctx context.Context, volumes []*types.Volume, p
 	if version == RARVersionUnknown {
 		return nil, fmt.Errorf("unknown RAR format")
 	}
+	if version == RARVersion4 {
+		if err := validateRAR4VolumeLabels(volumes); err != nil {
+			return nil, err
+		}
+	}
 
 	// Parse ALL volumes in parallel using worker pool
 	type volumeResult struct {
@@ -281,6 +285,7 @@ func (p *RARParser) parseArchive(ctx context.Context, volumes []*types.Volume, p
 		files             []*RARFileEntry
 		isHeaderEncrypted bool
 		encryptionKey     []byte // AES-256 key for encrypted file data
+		volumeInfo        *rar5VolumeInfo
 		err               error
 	}
 
@@ -327,6 +332,8 @@ func (p *RARParser) parseArchive(ctx context.Context, volumes []*types.Volume, p
 		// Parse this volume's file entries
 		var volumeFiles []*RARFileEntry
 		var isEncrypted bool
+		var encryptionKey []byte
+		var volumeInfo *rar5VolumeInfo
 		var err error
 
 		switch version {
@@ -337,10 +344,8 @@ func (p *RARParser) parseArchive(ctx context.Context, volumes []*types.Volume, p
 			} else if result != nil {
 				volumeFiles = result.Files
 				isEncrypted = result.IsHeaderEncrypted
-				// Store the encryption key from first encrypted volume
-				if len(result.EncryptionKey) > 0 {
-					return volumeResult{index: volIdx, files: volumeFiles, isHeaderEncrypted: isEncrypted, encryptionKey: result.EncryptionKey, err: nil}
-				}
+				encryptionKey = result.EncryptionKey
+				volumeInfo = result.volumeInfo
 			}
 		case RARVersion4:
 			volumeFiles, err = p.parseRAR4Stream(stream, volIdx, vol.Name, vol.Size)
@@ -352,7 +357,7 @@ func (p *RARParser) parseArchive(ctx context.Context, volumes []*types.Volume, p
 			return volumeResult{index: volIdx, files: nil, err: err}
 		}
 
-		return volumeResult{index: volIdx, files: volumeFiles, isHeaderEncrypted: isEncrypted, err: nil}
+		return volumeResult{index: volIdx, files: volumeFiles, isHeaderEncrypted: isEncrypted, encryptionKey: encryptionKey, volumeInfo: volumeInfo}
 	})
 
 	// Sort results by index to maintain order and collect files
@@ -360,7 +365,7 @@ func (p *RARParser) parseArchive(ctx context.Context, volumes []*types.Volume, p
 		return results[i].index < results[j].index
 	})
 
-	var allRawFiles []*RARFileEntry
+	fileCount := 0
 	isHeaderEncrypted := false
 	for _, result := range results {
 		if result.err != nil {
@@ -369,11 +374,22 @@ func (p *RARParser) parseArchive(ctx context.Context, volumes []*types.Volume, p
 		if result.isHeaderEncrypted {
 			isHeaderEncrypted = true
 		}
-		allRawFiles = append(allRawFiles, result.files...)
+		fileCount += len(result.files)
+	}
+	singleRAR5Incomplete := version == RARVersion5 && len(results) == 1 && results[0].volumeInfo != nil &&
+		results[0].volumeInfo.multi && (results[0].volumeInfo.number > 0 || results[0].volumeInfo.next)
+	// A metadata/service-only volume may be necessary to complete the RAR5
+	// index sequence even though it contributes no logical member bytes.
+	if fileCount == 0 && singleRAR5Incomplete {
+		cause := fmt.Errorf("no files found in any RAR volume")
+		if isHeaderEncrypted {
+			cause = fmt.Errorf("RAR archive has encrypted headers; password required or incorrect")
+		}
+		return nil, &rarIncompleteVolumeError{cause: cause, version: RARVersion5}
 	}
 
 	// If headers are encrypted, we can't list files without password
-	if isHeaderEncrypted && len(allRawFiles) == 0 {
+	if isHeaderEncrypted && fileCount == 0 {
 		return &RARArchiveInfo{
 			Version:           version,
 			IsMultiVol:        len(volumes) > 1,
@@ -382,9 +398,51 @@ func (p *RARParser) parseArchive(ctx context.Context, volumes []*types.Volume, p
 		}, nil
 	}
 
-	if len(allRawFiles) == 0 {
+	if fileCount == 0 {
 		return nil, fmt.Errorf("no files found in any RAR volume")
 	}
+	order := make([]int, len(results))
+	for i := range order {
+		order[i] = i
+	}
+	if version == RARVersion5 {
+		infos := make([]*rar5VolumeInfo, len(results))
+		for i, result := range results {
+			if result.isHeaderEncrypted != results[0].isHeaderEncrypted {
+				return nil, fmt.Errorf("inconsistent RAR5 header encryption across volumes")
+			}
+			infos[i] = result.volumeInfo
+		}
+		var err error
+		order, err = rar5VolumeOrder(infos)
+		if err != nil {
+			if len(results) > maxRARDiagnosticParts {
+				return nil, err
+			}
+			members := make([][]*RARFileEntry, len(results))
+			for i, result := range results {
+				members[i] = result.files
+			}
+			groupErr := rar5GroupBoundaryFailure(err, infos, members)
+			if singleRAR5Incomplete {
+				return nil, &rarIncompleteVolumeError{cause: groupErr, version: RARVersion5}
+			}
+			return nil, groupErr
+		}
+	}
+	var allRawFiles []*RARFileEntry
+	ordered := make([]volumeResult, len(results))
+	for index, original := range order {
+		ordered[index] = results[original]
+		for _, file := range ordered[index].files {
+			file.VolumeIndex = index
+			for _, part := range file.VolumeParts {
+				part.PartNumber = index
+			}
+		}
+		allRawFiles = append(allRawFiles, ordered[index].files...)
+	}
+	results = ordered
 
 	var encryptionKey []byte
 	for _, result := range results {
@@ -398,6 +456,22 @@ func (p *RARParser) parseArchive(ctx context.Context, volumes []*types.Volume, p
 	// Files that span multiple volumes will have multiple entries with the same name
 	files, err := p.aggregateFileParts(allRawFiles)
 	if err != nil {
+		if boundary, ok := err.(*rarBoundaryError); ok {
+			if version == RARVersion4 && len(results) <= maxRARDiagnosticParts {
+				members := make([][]*RARFileEntry, len(results))
+				for i, result := range results {
+					members[i] = result.files
+				}
+				groupErr := rar4GroupBoundaryFailure(boundary, members)
+				if len(results) == 1 {
+					return nil, &rarIncompleteVolumeError{cause: groupErr, version: RARVersion4}
+				}
+				return nil, groupErr
+			}
+			// Complete RAR5 index/end metadata contradicts a missing member
+			// boundary. Only its earlier incomplete-index path supplies hints.
+			return nil, boundary.cause
+		}
 		return nil, err
 	}
 
@@ -408,6 +482,7 @@ func (p *RARParser) parseArchive(ctx context.Context, volumes []*types.Volume, p
 		IsDataEncrypted:   len(encryptionKey) > 0,
 		EncryptionKey:     encryptionKey,
 		Files:             files,
+		VolumeOrder:       order,
 	}
 	return archiveInfo, nil
 }
@@ -498,9 +573,10 @@ func (p *RARParser) parseRAR5Headers(data []byte, volumeIndex int, volumeName st
 
 // rar5HeaderData represents a RAR 5.0 header
 type rar5HeaderData struct {
-	Type  uint64
-	Flags uint64
-	Data  []byte
+	Type      uint64
+	Flags     uint64
+	Data      []byte
+	ExtraSize int
 }
 
 // readRAR5Header reads a single RAR 5.0 header
@@ -536,8 +612,9 @@ func (p *RARParser) readRAR5Header(r *bytes.Reader) (*rar5HeaderData, int, int64
 	}
 
 	// Read extra area size if present
+	var extraAreaSize uint64
 	if headerFlags&RAR5HeaderFlagExtraArea != 0 {
-		_, err = readVInt(r)
+		extraAreaSize, err = readVInt(r)
 		if err != nil {
 			return nil, 0, 0, err
 		}
@@ -564,6 +641,9 @@ func (p *RARParser) readRAR5Header(r *bytes.Reader) (*rar5HeaderData, int, int64
 		return nil, 0, 0, fmt.Errorf("invalid header size calculation: remaining=%d (headerSize=%d, consumed=%d)",
 			remainingHeaderSize, headerSize, consumedSize)
 	}
+	if extraAreaSize > uint64(remainingHeaderSize) {
+		return nil, 0, 0, fmt.Errorf("RAR5 extra area exceeds header body")
+	}
 
 	var headerData []byte
 	if remainingHeaderSize > 0 {
@@ -576,9 +656,10 @@ func (p *RARParser) readRAR5Header(r *bytes.Reader) (*rar5HeaderData, int, int64
 	totalHeaderSize := int(headerSize) + 4 // Include CRC
 
 	return &rar5HeaderData{
-		Type:  headerType,
-		Flags: headerFlags,
-		Data:  headerData,
+		Type:      headerType,
+		Flags:     headerFlags,
+		Data:      headerData,
+		ExtraSize: int(extraAreaSize),
 	}, totalHeaderSize, dataAreaSize, nil
 }
 
@@ -693,90 +774,74 @@ func (p *RARParser) parseRAR5FileHeader(data []byte, volumeIndex int, volumeName
 	var isEncrypted bool
 	var encryptionIV []byte
 	var encryptionKey []byte
+	var encryptionSalt, encryptionCheck []byte
+	var encryptionKDF int
 
-	if r.Len() > 0 {
-		// Parse extra area records
-		for r.Len() > 2 {
-			// Read record size (vint)
-			recordSize, err := readVInt(r)
-			if err != nil || recordSize == 0 || recordSize > 65536 {
-				break
-			}
-
-			// Read record type (vint)
-			recordType, err := readVInt(r)
-			if err != nil {
-				break
-			}
-
-			// Calculate remaining data in this record
-			recordDataSize := int(recordSize) - 1 // Minus the type byte (approximate)
-			if recordDataSize <= 0 || recordDataSize > 65536 || recordDataSize > r.Len() {
-				// Invalid or too large record - stop parsing extra area
-				break
-			}
-
-			if recordType == RAR5ExtraTypeEncryption {
-				// Encryption record format:
-				// - Version (vint)
-				// - Flags (vint)
-				// - KDF count (1 byte)
-				// - Salt (16 bytes, if UseAES256 flag set)
-				// - IV (16 bytes)
-				// - Check value (12 bytes, optional if flags & 0x01)
-				isEncrypted = true
-
-				// Read encryption version
-				_, err := readVInt(r)
-				if err != nil {
-					break
-				}
-
-				// Read flags
-				encFlags, err := readVInt(r)
-				if err != nil {
-					break
-				}
-
-				// Read KDF count (1 byte)
-				kdfByte, err := r.ReadByte()
-				if err != nil {
-					break
-				}
-				kdfCount := int(kdfByte)
-
-				// Read salt (16 bytes)
-				salt := make([]byte, 16)
-				if _, err := io.ReadFull(r, salt); err != nil {
-					break
-				}
-
-				// If we have a password, derive the file-specific key using this salt
-				if password != "" {
-					derivedKeys := crypto.DeriveKeys([]byte(password), salt, kdfCount)
-					encryptionKey = derivedKeys.Key
-				}
-
-				// Read IV (16 bytes) - THIS IS WHAT WE NEED
-				iv := make([]byte, 16)
-				if _, err := io.ReadFull(r, iv); err != nil {
-					break
-				}
-				encryptionIV = iv
-
-				// Skip check value if present (flags & 0x01 = has check)
-				if encFlags&0x01 != 0 {
-					checkValue := make([]byte, 12)
-					_, _ = io.ReadFull(r, checkValue)
-				}
-			} else {
-				// Skip other record types
-				skipData := make([]byte, recordDataSize)
-				if _, err := io.ReadFull(r, skipData); err != nil {
-					break
-				}
+	for r.Len() > 0 {
+		recordSize, err := readVInt(r)
+		if err != nil || recordSize == 0 || recordSize > 65536 || recordSize > uint64(r.Len()) {
+			return nil
+		}
+		// Bound every record before reading its fields. A truncated encryption
+		// record must not borrow its salt, IV, or check from the next record.
+		recordData := make([]byte, int(recordSize))
+		if _, err := io.ReadFull(r, recordData); err != nil {
+			return nil
+		}
+		record := bytes.NewReader(recordData)
+		recordType, err := readVInt(record)
+		if err != nil {
+			return nil
+		}
+		if recordType != RAR5ExtraTypeEncryption {
+			continue
+		}
+		if isEncrypted {
+			return nil // Conflicting encryption records are ambiguous.
+		}
+		version, err := readVInt(record)
+		if err != nil {
+			return nil
+		}
+		encFlags, err := readVInt(record)
+		if err != nil {
+			return nil
+		}
+		kdfByte, err := record.ReadByte()
+		if err != nil {
+			return nil
+		}
+		kdfCount := int(kdfByte)
+		if err := crypto.ValidateEncryptionParameters(version, kdfCount); err != nil {
+			return nil
+		}
+		salt := make([]byte, 16)
+		if _, err := io.ReadFull(record, salt); err != nil {
+			return nil
+		}
+		iv := make([]byte, 16)
+		if _, err := io.ReadFull(record, iv); err != nil {
+			return nil
+		}
+		var checkValue []byte
+		if encFlags&0x01 != 0 {
+			checkValue = make([]byte, 12)
+			if _, err := io.ReadFull(record, checkValue); err != nil {
+				return nil
 			}
 		}
+		isEncrypted = true
+		encryptionIV = iv
+		encryptionSalt, encryptionCheck, encryptionKDF = salt, checkValue, kdfCount
+	}
+	// Validate the entire extra area before doing password work. A duplicate
+	// or malformed later record must not trigger a maximum-cost derivation.
+	if isEncrypted && password != "" {
+		derivedKeys, err := crypto.DeriveKeys([]byte(password), encryptionSalt, encryptionKDF)
+		if err != nil || (encryptionCheck != nil && !crypto.VerifyPassword(derivedKeys, encryptionCheck)) {
+			return nil
+		}
+		encryptionKey = derivedKeys.Key
 	}
 
 	return &RARFileEntry{
@@ -1321,7 +1386,7 @@ func (p *RARParser) aggregateFileParts(rawFiles []*RARFileEntry) ([]*RARFileEntr
 		existing, found := fileMap[file.Name]
 		if !found {
 			if file.SplitBefore {
-				return nil, fmt.Errorf("incomplete RAR member %q: first part is a continuation", file.Name)
+				return nil, newRARBoundaryError(fmt.Errorf("incomplete RAR member %q: first part is a continuation", file.Name), file, true)
 			}
 			copied := *file
 			copied.VolumeParts = append([]*types.RARVolumePart(nil), file.VolumeParts...)
@@ -1343,7 +1408,7 @@ func (p *RARParser) aggregateFileParts(rawFiles []*RARFileEntry) ([]*RARFileEntr
 	result := make([]*RARFileEntry, 0, len(fileMap))
 	for _, file := range fileMap {
 		if file.SplitAfter {
-			return nil, fmt.Errorf("incomplete RAR member %q: missing final volume", file.Name)
+			return nil, newRARBoundaryError(fmt.Errorf("incomplete RAR member %q: missing final volume", file.Name), file, false)
 		}
 		if file.IsStored && !file.IsDirectory && !file.IsEncrypted && file.PackedSize != file.UncompressedSize {
 			return nil, fmt.Errorf("incomplete RAR member %q: declared %d bytes, available %d", file.Name, file.UncompressedSize, file.PackedSize)

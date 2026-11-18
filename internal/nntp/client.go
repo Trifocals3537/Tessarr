@@ -580,17 +580,15 @@ func (c *Client) getConnectionFromProvider(ctx context.Context, provider config.
 		return nil, provider, fmt.Errorf("provider pool not found: %s", provider.Host)
 	}
 
-	select {
-	case pp.slots <- struct{}{}:
-		conn, err := c.getOrCreateFromPool(ctx, pp, provider)
-		if err != nil {
-			<-pp.slots
-			return nil, provider, err
-		}
-		return conn, provider, nil
-	case <-ctx.Done():
-		return nil, provider, ctx.Err()
+	if err := waitSlot(ctx, pp); err != nil {
+		return nil, provider, err
 	}
+	conn, err := c.getOrCreateFromPool(ctx, pp, provider)
+	if err != nil {
+		<-pp.slots
+		return nil, provider, err
+	}
+	return conn, provider, nil
 }
 
 // safeExecute wraps fn execution with panic recovery
@@ -644,8 +642,7 @@ func (c *Client) getAnyAvailableConnection(ctx context.Context, exclusions provi
 		eligibleCount++
 		pp := c.pools[provider.Host]
 
-		select {
-		case pp.slots <- struct{}{}:
+		if trySlot(ctx, pp) {
 			// Got a slot - try to get or create connection
 			conn, err := c.getOrCreateFromPool(ctx, pp, provider)
 			if err != nil {
@@ -653,7 +650,7 @@ func (c *Client) getAnyAvailableConnection(ctx context.Context, exclusions provi
 				continue   // Try next provider
 			}
 			return conn, provider, nil
-		default:
+		} else {
 			// Pool at capacity, try next provider
 			continue
 		}
@@ -703,10 +700,7 @@ func (c *Client) raceForConnection(ctx context.Context, eligible []config.Usenet
 			pp := c.pools[p.Host]
 
 			// Block waiting for slot (respects context)
-			select {
-			case pp.slots <- struct{}{}:
-				// Got slot
-			case <-innerCtx.Done():
+			if err := waitSlot(innerCtx, pp); err != nil {
 				return // Context cancelled before we got a slot — no send needed
 			}
 

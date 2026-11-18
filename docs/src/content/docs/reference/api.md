@@ -18,6 +18,17 @@ Get API token from **Settings** → **Auth** after login.
 
 ## Endpoints
 
+### Manual Usenet PAR2 recovery
+
+Use `/api/usenet/recovery/targets` to find an existing plain file, then submit
+its `nzb_id` and `file` to `/api/usenet/recovery/jobs`. Supply a matching original
+NZB as the multipart `source` field the first time; later JSON requests can reuse
+the verified copy. `GET /api/usenet/recovery/jobs` returns status and limits;
+`DELETE /api/usenet/recovery/jobs/{id}` cancels queued or running work.
+
+See [manual PAR2 recovery](../../guides/usenet/par2-recovery/) for examples,
+supported layouts, bandwidth costs, and restart behavior.
+
 ### GET /version
 
 Get Tessarr version.
@@ -126,6 +137,37 @@ curl -X DELETE \
   -H "Authorization: Bearer TOKEN" \
   http://localhost:8282/api/torrents?category=sonarr&hash=abc123
 ```
+
+### GET /api/cleanup/workflows
+
+Lists retained queue-cleanup work and up to 100 completion checkpoints. The
+active view includes the saved queue incarnation, workflow revision, attempts,
+state, reason, next retry time and original preserving policy. Claim tokens,
+account fingerprints and provider/source credentials are omitted. A completion
+checkpoint with `completion_pending` still has an active durable cleanup intent.
+
+### POST /api/cleanup/workflows/{key}/resolve
+
+Requests a fenced retry or reconciliation using the original saved cleanup
+policy. Browser sessions require the same origin protections as configuration
+changes; API clients may use their bearer token.
+
+```json
+{
+  "incarnation": "the-incarnation-returned-by-GET",
+  "revision": 7,
+  "request_id": "f3346535-3aa7-401e-8ddc-26c0f20fd833",
+  "action": "reconcile"
+}
+```
+
+Actions are `retry` and `reconcile`. A successful request returns `202`; stale
+incarnations or revisions return `409`. Repeated identical request IDs are
+idempotent. Reconciliation verifies exact provider absence and can acknowledge
+already absent outputs or remove verified empty, UUID-owned NZB staging folders.
+It preserves persistent Usenet metadata, library paths and deletion fences.
+Uncertain transfers, changed accounts, foreign/nonempty folders and ambiguous
+quarantines remain blocked. There is no force-complete action.
 
 ### GET /api/repair/config
 

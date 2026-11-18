@@ -13,6 +13,10 @@ class RepairManager {
         this.latestStatus = {};
         this.bind();
         this.loadAll();
+        this.loadCleanup();
+        this.cleanupTimer = setInterval(() => this.loadCleanup(), 15000);
+		if (document.getElementById('par2Panel')) this.par2Recovery = new PAR2RecoveryManager(this.api);
+        window.addEventListener("pagehide", () => clearInterval(this.cleanupTimer), {once: true});
     }
 
     bind() {
@@ -22,6 +26,7 @@ class RepairManager {
         $('fixBrokenBtn')?.addEventListener('click', () => this.fixBroken());
         $('clearStateBtn')?.addEventListener('click', () => this.openClearStateModal());
         $('viewBrokenBtn')?.addEventListener('click', () => this.openBrokenModal());
+        $('refreshCleanupBtn')?.addEventListener('click', () => this.loadCleanup());
         $('refreshHistoryBtn')?.addEventListener('click', () => this.loadHistory());
         $('refreshBrokenBtn')?.addEventListener('click', () => this.loadBroken());
         $('clearHistoryBtn')?.addEventListener('click', () => this.clearHistory());
@@ -48,6 +53,72 @@ class RepairManager {
         await Promise.all([this.loadRepairConfig(), this.loadStatus(), this.loadHistory(), this.loadArrs()]);
     }
 
+    async loadCleanup() {
+        const list = document.getElementById('cleanupWorkList');
+        if (!list) return;
+        try {
+            const data = await this.fetchJSON(`${this.api}/cleanup/workflows`);
+            document.getElementById('cleanupStatus').textContent = data.total ? `${data.total} cleanup item(s) retained` : 'No pending cleanup.';
+            list.replaceChildren();
+            for (const item of data.active || []) {
+                const row = document.createElement('div');
+                row.className = 'bg-base-200 rounded-lg p-3 space-y-2';
+                const title = document.createElement('p');
+                title.className = 'font-medium break-all';
+                title.textContent = item.name || item.key;
+                const detail = document.createElement('p');
+                detail.className = 'text-sm break-all';
+                detail.textContent = `${item.state} · attempt ${item.attempts} · ${String(item.reason || 'waiting').replaceAll('_', ' ')}${item.next_at && !item.next_at.startsWith('0001') ? ` · next check ${new Date(item.next_at).toLocaleString()}` : ''}`;
+                const path = document.createElement('p');
+                path.className = 'text-xs font-mono break-all';
+                path.textContent = item.saved_path || '';
+                row.append(title, detail, path);
+                for (const action of ['retry', 'reconcile']) {
+                    const button = document.createElement('button');
+                    button.className = 'btn btn-sm btn-outline mr-2';
+                    button.textContent = action === 'retry' ? 'Retry saved cleanup' : 'Reconcile verified leftovers';
+                    button.disabled = item.state === 'running';
+                    button.addEventListener('click', () => this.resolveCleanup(item, action, button));
+                    row.append(button);
+                }
+                list.append(row);
+            }
+            const history = document.getElementById('cleanupHistory');
+            history.replaceChildren();
+            for (const item of data.history || []) {
+                const line = document.createElement('p');
+                line.textContent = `${item.key} · ${item.state} · ${item.decisions?.length || 0} operator decision(s)`;
+                history.append(line);
+            }
+        } catch (error) {
+            document.getElementById('cleanupStatus').textContent = `Cleanup status unavailable: ${error.message}`;
+        }
+    }
+
+    async resolveCleanup(item, action, button) {
+        const message = action === 'retry'
+            ? 'Retry this item using its original cleanup policy and safeguards?'
+            : 'Verify the saved provider IDs and reconcile absent outputs or empty owned staging folders? Existing media and uncertain provider transfers remain protected.';
+        if (!window.confirm(message)) return;
+        button.disabled = true;
+        const bytes = new Uint8Array(16);
+        if (!globalThis.crypto?.getRandomValues) { this.toast("Recovery actions require browser cryptographic support.", "error"); button.disabled = false; return; }
+        globalThis.crypto.getRandomValues(bytes);
+        bytes[6] = (bytes[6] & 15) | 64;
+        bytes[8] = (bytes[8] & 63) | 128;
+        const hex = Array.from(bytes, b => b.toString(16).padStart(2, '0')).join('');
+        const requestId = `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+
+        try {
+            const response = await fetch(`${this.api}/cleanup/workflows/${encodeURIComponent(item.key)}/resolve`, {
+                method: 'POST', credentials: 'same-origin', headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({incarnation: item.incarnation, revision: item.revision, request_id: requestId, action}),
+            });
+            if (!response.ok) throw new Error(await response.text() || `HTTP ${response.status}`);
+            this.toast('Cleanup recovery scheduled.', 'success');
+        } catch (error) { this.toast(error.message, 'error'); }
+        await this.loadCleanup();
+    }
     async loadRepairConfig() {
         try {
             this.repairConfig = await this.fetchJSON(`${this.api}/repair/config`) || {};
@@ -777,3 +848,131 @@ class RepairManager {
 }
 
 window.RepairManager = RepairManager;
+
+class PAR2RecoveryManager {
+    constructor(api) {
+        this.api = api;
+        this.cursor = '';
+        this.targets = new Map();
+        this.searchRevision = 0;
+        this.jobsRevision = 0;
+        this.query = '';
+        this.timer = null;
+        this.stopped = false;
+        document.getElementById('par2SearchBtn').addEventListener('click', () => this.search(true));
+        document.getElementById('par2MoreBtn').addEventListener('click', () => this.search(false));
+        document.getElementById('par2RefreshBtn').addEventListener('click', () => this.loadJobs());
+        document.getElementById('par2Form').addEventListener('submit', (event) => { event.preventDefault(); this.start(); });
+        window.addEventListener('pagehide', () => { this.stopped = true; clearTimeout(this.timer); }, {once: true});
+        this.loadJobs();
+    }
+
+    status(message) { document.getElementById('par2Status').textContent = message; }
+
+    async request(path, options = {}) {
+        const response = await fetch(`${this.api}/usenet/recovery/${path}`, {...options, credentials: 'same-origin'});
+        let data;
+        try { data = await response.json(); } catch { throw new Error(`Recovery request failed (HTTP ${response.status}).`); }
+        if (!response.ok) throw new Error(data.error || `Recovery request failed (HTTP ${response.status}).`);
+        return data;
+    }
+
+    async search(reset) {
+        const query = document.getElementById('par2Search').value.trim();
+        if (query.length < 2) { this.status('Enter at least two characters from the NZB name.'); return; }
+        if (reset || query !== this.query) { this.cursor = ''; this.targets.clear(); document.getElementById('par2Target').replaceChildren(); }
+        this.query = query;
+        const revision = ++this.searchRevision;
+        const button = document.getElementById('par2SearchBtn');
+        const more = document.getElementById('par2MoreBtn');
+        button.disabled = true;
+        more.disabled = true;
+        this.status('Finding existing files…');
+        try {
+            for (let page = 0; page < 3; page++) {
+                const data = await this.request(`targets?q=${encodeURIComponent(query)}&after=${encodeURIComponent(this.cursor)}`);
+                if (revision !== this.searchRevision || this.stopped) return;
+                for (const item of data.items || []) this.targets.set(JSON.stringify([item.nzb_id, item.file]), item);
+                this.cursor = data.next || '';
+                if (!this.cursor || this.targets.size >= 50) break;
+            }
+            const select = document.getElementById('par2Target');
+            select.replaceChildren();
+            for (const [key, item] of this.targets) {
+                const option = document.createElement('option');
+                option.value = key;
+                option.textContent = `${item.nzb} — ${item.file}`;
+                select.append(option);
+            }
+            document.getElementById('par2MoreBtn').classList.toggle('hidden', !this.cursor);
+            this.status(this.targets.size ? 'Select a file and its original NZB, then start recovery.' : this.cursor ? 'No matches in this page. Continue searching or use a more specific NZB name.' : 'No matching supported plain files were found.');
+        } catch (error) { if (revision === this.searchRevision) this.status(error.message); }
+        finally { if (revision === this.searchRevision) { button.disabled = false; more.disabled = false; } }
+    }
+
+    async start() {
+        const target = this.targets.get(document.getElementById('par2Target').value);
+        if (!target) { this.status('Find and select an existing file first.'); return; }
+        const source = document.getElementById('par2Source').files?.[0];
+        if (source && source.size > 16 * 1024 * 1024) { this.status('The original NZB must be no larger than 16 MiB.'); return; }
+        const form = new FormData();
+        form.append('nzb_id', target.nzb_id);
+        form.append('file', target.file);
+        if (source) form.append('source', source);
+        const button = document.getElementById('par2StartBtn');
+        button.disabled = true;
+        try {
+            await this.request('jobs', {method: 'POST', body: form});
+            document.getElementById('par2Source').value = '';
+            this.status('Recovery queued.');
+            await this.loadJobs();
+        } catch (error) { this.status(error.message); }
+        finally { button.disabled = false; }
+    }
+
+    async cancel(id, button) {
+        button.disabled = true;
+        try { await this.request(`jobs/${encodeURIComponent(id)}`, {method: 'DELETE'}); await this.loadJobs(); }
+        catch (error) { this.status(error.message); button.disabled = false; }
+    }
+
+    async loadJobs() {
+        clearTimeout(this.timer);
+        if (this.stopped) return;
+        const revision = ++this.jobsRevision;
+        try {
+            const data = await this.request('jobs');
+            if (this.stopped || revision !== this.jobsRevision) return;
+            const jobs = data.jobs || [];
+            this.renderJobs(jobs);
+            const active = jobs.some(job => job.state === 'queued' || job.state === 'running');
+            if (active) this.timer = setTimeout(() => this.loadJobs(), 2000);
+            if (!jobs.length) this.status('No recovery jobs yet.');
+        } catch (error) { if (!this.stopped && revision === this.jobsRevision) this.status(error.message); }
+    }
+
+    renderJobs(jobs) {
+        const list = document.getElementById('par2Jobs');
+        list.replaceChildren();
+        for (const job of jobs) {
+            const row = document.createElement('div');
+            row.className = 'bg-base-200 rounded-lg p-3 space-y-2';
+            const title = document.createElement('p');
+            title.className = 'font-medium break-all';
+            title.textContent = job.file;
+            const detail = document.createElement('p');
+            detail.className = 'text-sm';
+            detail.textContent = `${job.state} · ${job.stage} · ${(Math.max(0, Number(job.read_bytes) || 0) / 1048576).toFixed(1)} MiB read`;
+            row.append(title, detail);
+            if (job.reason) { const reason = document.createElement('p'); reason.className = 'text-sm break-all'; reason.textContent = job.reason; row.append(reason); }
+            if (job.state === 'queued' || job.state === 'running') {
+                const button = document.createElement('button');
+                button.type = 'button'; button.className = 'btn btn-outline btn-sm'; button.textContent = 'Cancel recovery';
+                button.addEventListener('click', () => this.cancel(job.id, button));
+                row.append(button);
+            }
+            list.append(row);
+        }
+    }
+}
+window.PAR2RecoveryManager = PAR2RecoveryManager;

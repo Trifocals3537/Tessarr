@@ -30,19 +30,20 @@ var (
 		{regexp.MustCompile(`(?i)Seasons\.?\s*\d{1,2}-\d{1,2}`), "Season %02d"},
 
 		// Complete Series -> Season X
-		{regexp.MustCompile(`(?i)Complete\.?Series`), "Season %02d"},
+		{regexp.MustCompile(`(?i)Complete[.\s]*Series`), "Season %02d"},
 
 		// All Seasons -> Season X
-		{regexp.MustCompile(`(?i)All\.?Seasons?`), "Season %02d"},
+		{regexp.MustCompile(`(?i)All[.\s]*Seasons?`), "Season %02d"},
 	}
 
 	// Also pre-compile other patterns
 	seasonPattern     = regexp.MustCompile(`(?i)(?:season\.?\s*|s)(\d{1,2})`)
+	episodePattern    = regexp.MustCompile(`(?i)S\d{1,2}E\d{1,3}(?:E\d{1,3})*`)
 	qualityIndicators = regexp.MustCompile(`(?i)\b(2160p|1080p|720p|BluRay|WEB-DL|HDTV|x264|x265|HEVC)`)
 
 	multiSeasonIndicators = []*regexp.Regexp{
-		regexp.MustCompile(`(?i)complete\.?series`),
-		regexp.MustCompile(`(?i)all\.?seasons?`),
+		regexp.MustCompile(`(?i)complete[.\s]*series`),
+		regexp.MustCompile(`(?i)all[.\s]*seasons?`),
 		regexp.MustCompile(`(?i)season\.?\s*\d+\s*-\s*\d+`),
 		regexp.MustCompile(`(?i)s\d+\s*-\s*s?\d+`),
 		regexp.MustCompile(`(?i)seasons?\s*\d+\s*-\s*\d+`),
@@ -70,15 +71,12 @@ func convertToMultiSeason(torrent *storage.Entry, seasons []SeasonInfo) []*stora
 		seasonFiles := make(map[string]*storage.File)
 		size := int64(0)
 		for _, file := range seasonInfo.Files {
-			seasonFiles[file.Name] = &storage.File{
-				Name:      file.Name,
-				Path:      file.Path,
-				Size:      file.Size,
-				ByteRange: file.ByteRange,
-				Deleted:   file.Deleted,
-				InfoHash:  file.InfoHash,
-				AddedOn:   torrent.AddedOn,
+			fileCopy := *file
+			if file.ByteRange != nil {
+				byteRange := *file.ByteRange
+				fileCopy.ByteRange = &byteRange
 			}
+			seasonFiles[file.Name] = &fileCopy
 			size += file.Size
 		}
 
@@ -107,6 +105,7 @@ func convertToMultiSeason(torrent *storage.Entry, seasons []SeasonInfo) []*stora
 			Providers:               make(map[string]*storage.ProviderEntry),
 			Files:                   seasonFiles,
 			FileScopeRestricted:     true,
+			SeasonSource:            &storage.SeasonSource{InfoHash: torrent.InfoHash, Season: seasonInfo.SeasonNumber},
 			SkipMultiSeason:         true,
 		}
 
@@ -150,9 +149,17 @@ func replaceMultiSeasonPattern(name string, targetSeason int) string {
 }
 
 func insertSeasonIntoName(name string, seasonNum int) string {
-	// Check if season info already exists
+	// A season job must not retain the parent's single-episode title.
+	if episodePattern.MatchString(name) {
+		return episodePattern.ReplaceAllString(name, fmt.Sprintf("S%02d", seasonNum))
+	}
 	if seasonPattern.MatchString(name) {
-		return name // Already has season info, keep as is
+		return seasonPattern.ReplaceAllStringFunc(name, func(match string) string {
+			if strings.HasPrefix(strings.ToLower(match), "season") {
+				return fmt.Sprintf("Season %02d", seasonNum)
+			}
+			return fmt.Sprintf("S%02d", seasonNum)
+		})
 	}
 
 	// Try to find a good insertion point (before quality indicators)
@@ -269,4 +276,52 @@ func generateSeasonHash(originalHash string, seasonNumber int) string {
 	source := fmt.Sprintf("%s-%d", originalHash, seasonNumber)
 	hash := md5.Sum([]byte(source))
 	return fmt.Sprintf("%x", hash)
+}
+
+// seasonSource loads the real mounted/provider entry and proves that a child
+// still describes exactly its original season. Never infer this relationship
+// from a display title, a provider ID, or an arbitrary file's InfoHash.
+func (m *Manager) seasonSource(child *storage.Entry) (*storage.Entry, error) {
+	if child == nil || !child.IsTorrent() || !child.FileScopeRestricted || !child.SkipMultiSeason ||
+		child.SeasonSource == nil || child.SeasonSource.InfoHash == "" ||
+		child.SeasonSource.Season <= 0 || child.SeasonSource.Season >= 100 ||
+		child.InfoHash != generateSeasonHash(child.SeasonSource.InfoHash, child.SeasonSource.Season) {
+		return nil, fmt.Errorf("invalid or missing season source reference; re-import the parent torrent")
+	}
+	if m == nil || m.storage == nil {
+		return nil, fmt.Errorf("season source storage unavailable")
+	}
+	source, err := m.GetEntry(child.SeasonSource.InfoHash)
+	if err != nil {
+		return nil, fmt.Errorf("load season source: %w", err)
+	}
+	if source == nil || !source.IsTorrent() || source.FileScopeRestricted || source.SeasonSource != nil {
+		return nil, fmt.Errorf("invalid season source entry")
+	}
+	placement, scoped := source.GetActiveProvider(), child.GetActiveProvider()
+	if placement == nil || scoped == nil || source.ActiveProvider != child.ActiveProvider ||
+		placement.Provider != scoped.Provider || placement.ID != scoped.ID ||
+		placement.Status != debridTypes.TorrentStatusDownloaded {
+		return nil, fmt.Errorf("season source provider placement changed")
+	}
+	files := source.GetActiveFiles()
+	expected := groupFilesBySeason(files, findAllSeasons(files))[child.SeasonSource.Season]
+	if len(expected) == 0 || len(child.Files) != len(expected) || len(scoped.Files) != len(expected) {
+		return nil, fmt.Errorf("season source file scope changed")
+	}
+	for _, original := range expected {
+		file := child.Files[original.Name]
+		if file == nil || file.Deleted || file.ID != original.ID || file.Name != original.Name ||
+			file.Path != original.Path || file.Size != original.Size ||
+			(file.ByteRange == nil) != (original.ByteRange == nil) ||
+			(file.ByteRange != nil && *file.ByteRange != *original.ByteRange) {
+			return nil, fmt.Errorf("season source canonical file changed")
+		}
+		providerFile, childFile := placement.Files[original.Name], scoped.Files[original.Name]
+		if providerFile == nil || childFile == nil || providerFile.Id != childFile.Id ||
+			providerFile.Path != childFile.Path || providerFile.Link != childFile.Link {
+			return nil, fmt.Errorf("season source provider file changed")
+		}
+	}
+	return source, nil
 }

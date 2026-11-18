@@ -1,0 +1,110 @@
+name: Windows Exception Diagnostics
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - ".github/workflows/windows-exception-diagnostics.yml"
+      - "scripts/windows-exception-probe/**"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-exception-diagnostics-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  exception:
+    name: Windows exception sample ${{ matrix.attempt }}
+    runs-on: windows-latest
+    timeout-minutes: 18
+    strategy:
+      fail-fast: false
+      matrix:
+        attempt: [1, 2, 3, 4]
+    env:
+      CGO_ENABLED: "0"
+      GOAMD64: v1
+      GOENV: "off"
+      GOEXPERIMENT: ""
+      GOTOOLCHAIN: local
+      GOWORK: "off"
+      GODEBUG: adaptivestackstart=0
+      GOGC: "off"
+      GOMEMLIMIT: "off"
+      GOTRACEBACK: system
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          repository: denisvmedia/ptah-2365-repro
+          ref: 72cb4a8a27ef8c86347f8eee237c23e7b6681e85
+          path: diagnostics/upstream-repro
+          persist-credentials: false
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: true
+          cache-dependency-path: go.sum
+
+      - name: Record toolchain and public runner context
+        id: context
+        shell: pwsh
+        run: |
+          go version | Set-Content diagnostics/toolchain.txt
+          go env GOOS GOARCH CGO_ENABLED GOVERSION GOEXPERIMENT | Add-Content diagnostics/toolchain.txt
+          ./scripts/windows-exception-probe/context.ps1 > diagnostics/host-context.json
+          $hostContext = Get-Content diagnostics/host-context.json -Raw | ConvertFrom-Json
+          Write-Host ("Hosted runner context: processor={0}; xstate={1}; context_bytes={2}" -f $hostContext.processor, $hostContext.enabled_xstate_mask, $hostContext.context_size_bytes)
+          if ($hostContext.context_size_bytes -gt 4096) {
+            "large_context=true" >> $env:GITHUB_OUTPUT
+          }
+
+      - name: Verify classifier
+        shell: pwsh
+        run: go test -count=1 ./scripts/windows-exception-probe
+
+      - name: Build pinned upstream synthetic reproducer
+        shell: pwsh
+        run: |
+          go build -trimpath -buildvcs=false -o diagnostics/repro.exe diagnostics/upstream-repro/main_windows.go
+          exit $LASTEXITCODE
+
+      - name: Compare ordinary panic and recovered hardware fault
+        shell: pwsh
+        run: |
+          go run ./scripts/windows-exception-probe -binary diagnostics/repro.exe > diagnostics/result.json
+          $probeExit = $LASTEXITCODE
+          if (Test-Path diagnostics/result.json) {
+            Get-Content diagnostics/result.json -Raw | ConvertFrom-Json |
+              Select-Object -ExpandProperty cases |
+              Select-Object case, result, exit_code | Format-Table
+          }
+          exit $probeExit
+
+      - name: Exercise manager on the same host with normal GC
+        if: ${{ !cancelled() && (steps.context.outputs.large_context == 'true' || matrix.attempt == 1) }}
+        shell: pwsh
+        run: |
+          Remove-Item Env:GODEBUG, Env:GOGC, Env:GOMEMLIMIT -ErrorAction SilentlyContinue
+          go test -json -count=3 -timeout=12m ./pkg/manager > diagnostics/manager-tests.jsonl 2> diagnostics/manager-stderr.txt
+          exit $LASTEXITCODE
+
+      - name: Retain synthetic exception evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: windows-exception-${{ matrix.attempt }}-run${{ github.run_attempt }}-${{ github.sha }}
+          path: |
+            diagnostics/toolchain.txt
+            diagnostics/host-context.json
+            diagnostics/result.json
+            diagnostics/manager-tests.jsonl
+            diagnostics/manager-stderr.txt
+          if-no-files-found: error
+          retention-days: 7

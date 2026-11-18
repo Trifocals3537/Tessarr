@@ -112,6 +112,15 @@ If a full repair sweep would take 2 days at 9 hours/day but `recheck_interval` i
 - **`arr`** — walks Sonarr / Radarr media, resolves each item to an entry through the symlink target, and probes that entry. Broken files are enriched with Arr identifiers for the durable recovery flow below.
 - **`managed`** — walks managed entries directly. Used when you don't have an Arr in front, or for entries imported outside the Arr flow. NZB-only managed brokens have no Arr re-acquire path; they stay `broken` with `failure_reason=usenet_segment_missing` for you to react to manually.
 
+### Manual PAR2 recovery
+
+For an already imported plain-file NZB, the Repair page offers
+[manual PAR2 recovery](../usenet/par2-recovery/). It can reconstruct missing or
+corrupt data using the original NZB's recovery files, independently of Arr
+replacement. It must be requested explicitly and may read the full recovery
+set. Completed imports normally discard their original NZBs, so the first
+recovery generally needs the original NZB to be uploaded.
+
 ### Optional NZB content verification
 
 The normal NZB probe checks whether sampled articles are available. For a

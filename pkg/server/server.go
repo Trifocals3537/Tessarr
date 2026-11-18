@@ -67,6 +67,8 @@ type ContentResponse struct {
 }
 
 type Server struct {
+	par2Admission   sync.Mutex
+	par2            par2API
 	router          *chi.Mux
 	logger          zerolog.Logger
 	manager         *manager.Manager

@@ -113,6 +113,7 @@ func (m *Manager) AddNewNZB(ctx context.Context, req *ImportRequest) (string, er
 		req.Arr.Name,
 	)
 	if err != nil {
+		m.recordNZBParseRejection(err)
 		parseErr := fmt.Errorf("usenet parse failed: %w", err)
 		if cleanupErr := cleanupRejected(req.Id); cleanupErr != nil {
 			return "", errors.Join(parseErr, fmt.Errorf("cleanup rejected NZB state: %w", cleanupErr))
@@ -236,12 +237,30 @@ func (m *Manager) processNZBJob(ctx context.Context, job *Job) error {
 }
 
 func (m *Manager) processNZB(ctx context.Context, entry *storage.Entry, metadata *storage.NZB) error {
+	return m.runNZBFinalization(ctx, entry, func(workCtx context.Context, current *storage.Entry) error {
+		return m.processNZBCompletion(workCtx, current, metadata)
+	})
+}
+
+// processNZBCompletion requires the shared finalization lease. It consumes a
+// fresh queue snapshot, never the active job or scheduler's older payload.
+func (m *Manager) processNZBCompletion(ctx context.Context, entry *storage.Entry, metadata *storage.NZB) error {
+	if metadata == nil || metadata.ID != entry.InfoHash || metadata.Status != usenet.NZBStatusCompleted {
+		return fmt.Errorf("completed NZB metadata does not match the queued entry")
+	}
+	placement := entry.GetActiveProvider()
+	if entry.ActiveProvider != "usenet" || placement == nil || placement.Provider != "usenet" || placement.ID != entry.InfoHash {
+		return fmt.Errorf("NZB placement does not match the queued source")
+	}
+	if len(metadata.Files) == 0 {
+		return fmt.Errorf("nzb has no files")
+	}
 	if _, err := safeUsenetEntryDownloadPath(m.config.DownloadFolder, entry); err != nil {
 		return fmt.Errorf("unsafe usenet download path: %w", err)
 	}
 	// Add files using logical streamable files
 	for _, file := range metadata.Files {
-		if _, err := safeUsenetFilePath(m.config.DownloadFolder, entry, file.Name); err != nil {
+		if _, err := usenetActionFilePath(m.config.DownloadFolder, entry, file.Name); err != nil {
 			return err
 		}
 		tFile := &storage.File{
@@ -253,15 +272,15 @@ func (m *Manager) processNZB(ctx context.Context, entry *storage.Entry, metadata
 		entry.Files[file.Name] = tFile
 	}
 	// Mark as complete
-	if placement := entry.GetActiveProvider(); placement != nil {
-		now := time.Now()
-		placement.DownloadedAt = &now
-		placement.Progress = 1.0
-	}
+	now := time.Now()
+	placement.DownloadedAt = &now
+	placement.Progress = 1.0
 	entry.Size = metadata.TotalSize
 	entry.Progress = 1.0
 	entry.UpdatedAt = time.Now()
-	_ = m.queue.Update(entry)
+	if err := m.queue.Update(entry); err != nil {
+		return err
+	}
 
 	if len(entry.Files) == 0 {
 		return fmt.Errorf("nzb has no files")
@@ -278,10 +297,26 @@ func (m *Manager) processNewNzb(parentCtx context.Context, entry *storage.Entry,
 
 	updatedNZB, err := m.usenet.Process(ctx, metadata, groups)
 	if err != nil {
+		processingErr := fmt.Errorf("failed to process nzb: %w", err)
 		if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
-			return fmt.Errorf("usenet processing timed out after %s: %w", m.usenetTimeout, err)
+			processingErr = fmt.Errorf("usenet processing timed out after %s: %w", m.usenetTimeout, err)
 		}
-		return fmt.Errorf("failed to process nzb: %w", err)
+		// Process may have persisted completion before a source-cleanup error.
+		// Reconcile under the same lease as the scheduler, so this error cannot
+		// escape to processJob and overwrite another owner's completed output.
+		return m.runNZBFinalization(ctx, entry, func(workCtx context.Context, current *storage.Entry) error {
+			durable, loadErr := m.usenet.GetNZBHeader(current.InfoHash)
+			if loadErr != nil || durable == nil {
+				loadErr = errors.Join(loadErr, fmt.Errorf("cannot reconcile NZB processing metadata"))
+				m.recordWorkflowFault(loadErr)
+				return errors.Join(processingErr, loadErr)
+			}
+			if durable.Status == usenet.NZBStatusCompleted {
+				m.logger.Warn().Err(processingErr).Str("entry", current.InfoHash).Msg("Reconciling completed NZB after processing error")
+				return m.processNZBCompletion(workCtx, current, durable)
+			}
+			return processingErr
+		})
 	}
 
 	metadata = updatedNZB

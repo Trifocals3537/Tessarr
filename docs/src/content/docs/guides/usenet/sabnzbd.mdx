@@ -53,6 +53,23 @@ Tessarr implements these Sabnzbd API endpoints:
 | `/sabnzbd/api?mode=config` | Get configuration |
 | `/sabnzbd/api?mode=delete` | Remove from queue |
 
+## Pause and Priority Limitations
+
+Tessarr does not support SABnzbd pause/resume or queue priority changes. Global
+`mode=pause` / `mode=resume`, queue `name=pause` / `name=resume` / `name=priority`,
+and timed `mode=config&name=set_pause` requests return HTTP 501 with
+`status: false` and an explanatory error. These requests leave the queue unchanged.
+
+For `addfile` and `addurl`, [SABnzbd's paused priority](https://sabnzbd.org/wiki/configuration/4.5/api)
+(`priority=-2`) and the stopped value (`-4`) are rejected with the same error status
+before any NZBs are fetched or admitted. Malformed and unknown priorities return
+HTTP 400. Omitted or blank priority, category default (`-100`), Low (`-1`), Normal
+(`0`), High (`1`), and Force (`2`) retain normal scheduling in Tessarr.
+
+Configure Arr clients to submit active downloads. If a release needs review or
+remapping first, keep it in Arr until it is ready to process; Tessarr cannot hold
+an accepted download for that review.
+
 ## Categories
 
 Categories organize downloads:
@@ -77,6 +94,48 @@ Tessarr translates NZB processing status to Sabnzbd equivalents:
 | Streaming | Downloading | File accessible |
 | Completed | Completed | Download finished |
 | Failed | Failed | Error occurred |
+
+## NZB Rejection Diagnostics
+
+Open **Stats → Overview → NZB Rejections** to see counts and the latest occurrence
+of parsing failures before an NZB entered the queue. The same summary is available
+as `nzb_admission` in `/debug/stats`, under your configured URL base and existing
+access controls. Stats refreshes from a background snapshot; a newly rejected
+attempt may take a few seconds to appear.
+
+| Reason | Meaning |
+|--------|---------|
+| Missing articles | The parser confirmed required probe articles were unavailable. |
+| Invalid NZB | The submitted body failed NZB validation or XML parsing. |
+| Provider access denied | An NNTP authentication or permission check failed. |
+| Request timed out | Parsing encountered a timeout or expired deadline. |
+| Provider unavailable | A connection, busy-server, or connection-pool failure occurred. |
+| Request cancelled | The parsing request was cancelled. |
+| Multiple failure types | Joined errors contained different failure categories. |
+| Other parse failure | No more specific category could be established. |
+
+Counts last until Tessarr restarts. The summary retains no titles, credentials,
+URLs, article IDs, paths, response bodies, or raw error messages. It does not add
+queue/history entries or change downloader health. Successful admissions do not
+increase these counters. Only requests that reached NZB parsing are counted;
+URL-fetch errors, queue-capacity failures, and failures later in an accepted job
+remain outside this summary.
+
+### Sonarr Reports an Unknown NZB Rejection
+
+The Sonarr 4.0.20.3014 behavior recorded in [issue #22](https://github.com/Trifocals3537/tessarr/issues/22)
+can produce `SABnzbd rejected the NZB for an unknown reason` and an HTTP 409 with
+`Getting release from indexer failed`. Its [SAB adapter](https://github.com/Sonarr/Sonarr/blob/cab419ade8ac7fcab5bf80394ee492abd35d5f5a/src/NzbDrone.Core/Download/Clients/Sabnzbd/Sabnzbd.cs)
+uses the generic message when accepted IDs are empty, and its [release controller](https://github.com/Sonarr/Sonarr/blob/cab419ade8ac7fcab5bf80394ee492abd35d5f5a/src/Sonarr.Api.V3/Indexers/ReleaseController.cs)
+produces the 409. That is Sonarr's response to the release attempt.
+
+For confirmed missing articles, Tessarr preserves the existing SAB response:
+HTTP 200, `status: true`, an empty `nzo_ids` list, and a missing-articles explanation.
+Check the rejection summary's reason and time, then use Tessarr's logs to inspect
+the matching attempt. Missing articles are release-specific; access failures and
+timeouts are separate categories. A fetched HTML page or Newznab error XML counts
+as invalid input, without assuming an authentication cause. Valid NZBs served as
+generic binary content remain supported.
 
 ### NZBs Not Processing
 

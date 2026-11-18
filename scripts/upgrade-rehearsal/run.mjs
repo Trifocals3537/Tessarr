@@ -182,7 +182,7 @@ await writeFile(path.join(settings, 'config.json'), JSON.stringify({
   mount: { type: 'none' },
   default_download_action: 'download',
   min_file_size: '1B',
-  allowed_file_types: ['.bin'],
+  allowed_file_types: ['bin'],
   max_active_downloads: 1,
   skip_multi_season: true,
   allow_samples: true,

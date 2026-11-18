@@ -253,12 +253,17 @@ async function start(exe, label, version) {
   report(label + ': readiness, version and persisted API authentication verified');
 }
 
-async function stop() {
+async function stop(interrupted = false) {
   if (!child) return;
-  child.kill();
-  await childDone;
+  child.kill(interrupted ? 'SIGKILL' : 'SIGTERM');
+  const stopped = await Promise.race([childDone.then(() => true), delay(12000, false, { ref: false })]);
+  if (!stopped) {
+    child.kill('SIGKILL');
+    await childDone;
+  }
   child = undefined;
   childDone = undefined;
+  assert(stopped, 'Tessarr did not stop within the rehearsal deadline');
 }
 
 function sabParams(mode) {
@@ -313,7 +318,7 @@ try {
   await until('download paused on a fixture article', () => held.has(queuedArticle));
   const active = (await slots('queue')).filter(row => row.nzo_id === queuedID);
   assert.equal(active.length, 1, 'expected one active job before upgrade');
-  await stop();
+  await stop(true);
   await cp(state, checkpoint, { recursive: true, errorOnExist: true, force: false });
   blocked.clear();
   report('Stopped v2.6.4 during an active file download and copied its persisted state');
@@ -345,7 +350,7 @@ try {
   const recovery = await json('/api/usenet/recovery/jobs', { method: 'POST', headers: api, body: data }, 202);
   await until('manual PAR2 job waiting on parity', async () => held.has(parityArticle) &&
     (await getRecovery()).jobs.some(job => job.id === recovery.id && job.state === 'running'));
-  await stop();
+  await stop(true);
   blocked.clear();
   await start(betaExe, 'par2-resume', betaVersion);
   const done = await until('recovered media', async () => {

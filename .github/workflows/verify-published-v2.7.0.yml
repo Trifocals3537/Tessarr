@@ -1,0 +1,141 @@
+name: Verify published v2.7.0
+
+on:
+  push:
+    branches:
+      - gitsune/verify-v2.7.0-release
+
+permissions:
+  contents: read
+
+jobs:
+  native:
+    name: Published package (${{ matrix.label }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: linux/amd64
+            runner: ubuntu-24.04
+            asset: tessarr_Linux_x86_64.tar.gz
+            sha256: e68ef24c4bd8169881b9af068c3497245df1fbd8094d89396b27483f14fb4317
+          - label: linux/arm64
+            runner: ubuntu-24.04-arm
+            asset: tessarr_Linux_arm64.tar.gz
+            sha256: 0d8fc1704ec0d908061469235cd29f4b30684dc4d02e804756f709a47b05f6a0
+          - label: darwin/amd64
+            runner: macos-15-intel
+            asset: tessarr_Darwin_x86_64.tar.gz
+            sha256: 600ae729ef1abb7d74ff932f8aeb994936158ad28be3e0d6fac34a42faeb40f9
+          - label: darwin/arm64
+            runner: macos-15
+            asset: tessarr_Darwin_arm64.tar.gz
+            sha256: 8d517e220435e7d2c3282117dae6608ca6e092446dfdf256628dce4dbb243bd6
+          - label: windows/amd64
+            runner: windows-latest
+            asset: tessarr_Windows_x86_64.zip
+            sha256: 2228c9eba3879ea445d1575e839ee396b90954ac52306a78da2a326c5c7c3609
+    env:
+      RELEASE_ASSET: ${{ matrix.asset }}
+      RELEASE_SHA256: ${{ matrix.sha256 }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
+        with:
+          node-version: "22"
+      - name: Install Linux FUSE runtime
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libfuse-dev
+      - name: Install macOS FUSE runtime
+        if: runner.os == 'macOS'
+        run: brew install macfuse
+      - name: Verify downloaded release package
+        run: node .github/scripts/verify-published-release.mjs
+
+  smoke:
+    name: Start published image (linux/${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 5
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    env:
+      IMAGE: ghcr.io/trifocals3537/tessarr@sha256:3ed971d4a60618c045058bc0ca80a8d99e6b3504a942323a0b4566dfbc886cd7
+      VERSION: 2.7.0
+      PLATFORM: linux/${{ matrix.arch }}
+    steps:
+      - name: Pull, validate and start the published digest
+        shell: bash
+        run: |
+          set -euo pipefail
+          container=tessarr-release-smoke
+          fixture="$(mktemp -d)"
+          trap 'docker rm -fv "$container" >/dev/null 2>&1 || true' EXIT
+
+          cat > "$fixture/config.json" <<'JSON'
+          {
+            "port": "8282",
+            "download_folder": "/app/downloads",
+            "disable_webdav": true,
+            "mount": {"type": "none"},
+            "usenet": {
+              "max_connections": 1,
+              "processing_max_connections": 1,
+              "providers": [{
+                "host": "127.0.0.1",
+                "port": 119,
+                "username": "fixture",
+                "password": "fixture",
+                "max_connections": 1
+              }]
+            }
+          }
+          JSON
+          chmod 755 "$fixture"
+          chmod 644 "$fixture/config.json"
+
+          docker pull --platform "$PLATFORM" "$IMAGE"
+          validation="$(docker run --rm --network none --platform "$PLATFORM" \
+            --env TESSARR_BIND_ADDRESS=127.0.0.1 \
+            --mount "type=bind,src=$fixture,dst=/fixture,readonly" \
+            "$IMAGE" /usr/bin/tessarr --config /fixture --check-config)"
+          grep -F 'Tessarr configuration is valid' <<< "$validation"
+
+          docker create --name "$container" --network none --platform "$PLATFORM" \
+            --env TESSARR_BIND_ADDRESS=127.0.0.1 "$IMAGE"
+          docker cp "$fixture/config.json" "$container:/app/config.json"
+          docker start "$container"
+
+          readiness=''
+          for attempt in {1..35}; do
+            if readiness="$(docker exec "$container" wget -qO- -T 2 http://127.0.0.1:8282/ready 2>/dev/null)"; then
+              break
+            fi
+            if [[ "$(docker inspect --format '{{.State.Running}}' "$container")" != true ]]; then
+              break
+            fi
+            sleep 1
+          done
+          if ! jq -e '.ready and .phase == "ready"' <<< "${readiness:-null}"; then
+            docker logs --tail 50 "$container"
+            exit 1
+          fi
+          docker exec "$container" wget -qO- -T 2 http://127.0.0.1:8282/live \
+            | jq -e '.status == "live"'
+          docker exec "$container" wget -qO- -T 2 http://127.0.0.1:8282/version \
+            | jq -e --arg version "$VERSION" '.version == $version and .channel == "stable"'
+          docker exec "$container" /container-defaults.sh /usr/bin/healthcheck --config /app --debug
+          docker stop --time 45 "$container"
+          test "$(docker inspect --format '{{.State.ExitCode}}' "$container")" = 0
+          logs="$(docker logs "$container" 2>&1)"
+          grep -F 'Tessarr has been stopped gracefully.' <<< "$logs"
+          echo "$PLATFORM passed startup, liveness, readiness, version, health and shutdown checks."

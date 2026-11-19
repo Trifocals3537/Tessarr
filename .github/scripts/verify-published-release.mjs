@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { execFileSync, spawn } from 'node:child_process';
-import { chmod, mkdir, mkdtemp, readFile, unlink, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readFile, realpath, unlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -9,7 +9,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 const { RELEASE_ASSET, RELEASE_SHA256 } = process.env;
 assert.match(RELEASE_ASSET, /^tessarr_(Linux|Darwin|Windows)_(x86_64|arm64)\.(tar\.gz|zip)$/);
 assert.match(RELEASE_SHA256, /^[a-f0-9]{64}$/);
-const root = await mkdtemp(path.join(tmpdir(), 'tessarr-v270-'));
+const root = await realpath(await mkdtemp(path.join(tmpdir(), 'tessarr-v270-')));
 const response = await fetch(
   `https://github.com/Trifocals3537/Tessarr/releases/download/v2.7.0/${RELEASE_ASSET}`,
   { signal: AbortSignal.timeout(90000) },

@@ -1,6 +1,7 @@
 import {pathToFileURL} from 'node:url';
 
-const repository = 'Trifocals3537/tessarr';
+const repository = 'Trifocals3537/Tessarr';
+const repositoryKey = repository.toLowerCase();
 const repositoryId = 1426317456;
 const ciPath = '.github/workflows/ci.yml';
 export const requiredJobs = [
@@ -14,6 +15,10 @@ function requireThat(condition, message) {
 
 function positiveInteger(value) {
     return Number.isSafeInteger(value) && value > 0;
+}
+
+function matchesRepositoryName(value) {
+    return typeof value === 'string' && value.toLowerCase() === repositoryKey;
 }
 
 // Request only GitHub's fixed API origin; never follow a redirect with a token.
@@ -53,7 +58,7 @@ async function listAll(read, path, key) {
 
 function validateRun(run, sha, runId, workflowId) {
     requireThat(run.id === runId && run.workflow_id === workflowId && run.path?.split('@')[0] === ciPath, 'The supplied run is not the CI workflow');
-    requireThat(run.repository?.id === repositoryId && run.repository?.full_name === repository && run.head_repository?.id === repositoryId, 'CI belongs to a different repository');
+    requireThat(run.repository?.id === repositoryId && matchesRepositoryName(run.repository.full_name) && run.head_repository?.id === repositoryId, 'CI belongs to a different repository');
     requireThat(run.head_branch === 'beta' && run.head_sha === sha, 'CI did not test this beta revision');
     requireThat(['push', 'workflow_dispatch'].includes(run.event), 'PR merge tests cannot authorize beta publishing');
     requireThat(run.status === 'completed' && run.conclusion === 'success', 'CI must be completed and successful');
@@ -64,7 +69,7 @@ function validateRun(run, sha, runId, workflowId) {
 // rejects a newly started/failed rerun of a previously successful attempt.
 export async function validateBeta(env, read) {
     requireThat(env.GITHUB_EVENT_NAME === 'workflow_dispatch', 'Beta publishing requires a manual request');
-    requireThat(env.GITHUB_REPOSITORY === repository && env.GITHUB_REPOSITORY_ID === String(repositoryId), 'Only the Tessarr repository may publish');
+    requireThat(matchesRepositoryName(env.GITHUB_REPOSITORY) && env.GITHUB_REPOSITORY_ID === String(repositoryId), 'Only the Tessarr repository may publish');
     requireThat(env.GITHUB_REF === 'refs/heads/beta', 'Select the beta branch');
     requireThat(['validate', 'build', 'publish'].includes(env.BETA_MODE), 'Select validate, build or publish mode');
     requireThat(env.BETA_MODE !== 'publish' || env.GITHUB_RUN_ATTEMPT === '1', 'Publishing reruns are refused; make a new explicit request');

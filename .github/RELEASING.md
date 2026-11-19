@@ -46,7 +46,7 @@ Each image is built from the validated SHA into an OCI archive before registry
 login. The gate runs again before upload and before promoting the shared
 channel tag, preserving multi-platform manifests, provenance and SBOMs. If beta
 or its CI moves during an upload, promotion stops; a version tag may already
-exist. Continuous beta versions use `2.6.0-beta.RUN_ID.SHA`, where `RUN_ID` is
+exist. Continuous beta versions use `2.7.0-beta.RUN_ID.SHA`, where `RUN_ID` is
 globally unique and `SHA` is the seven-character source prefix. The existing
 version badge continues linking to that source commit.
 

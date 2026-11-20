@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/Trifocals3537/tessarr/internal/safepath"
 	debridTypes "github.com/Trifocals3537/tessarr/pkg/debrid/types"
 	"github.com/Trifocals3537/tessarr/pkg/storage"
 )
@@ -82,15 +83,8 @@ func (m *Manager) recoverCompletedSeasonFanouts(ctx context.Context) error {
 			parent.SeasonFanoutComplete || parent.CreatedAt.IsZero() || parent.CreatedAt.After(childCreated) {
 			continue
 		}
-		output, err := safeTorrentEntryDownloadPath(m.config.DownloadFolder, parent)
-		if err != nil || (parent.ContentPath != "" && !sameFilesystemPath(parent.ContentPath, output)) {
+		if !completedFanoutParentOutputAbsent(m.config.DownloadFolder, parent) {
 			continue
-		}
-		if info, err := os.Stat(filepath.Dir(output)); err != nil || !info.IsDir() {
-			continue // An unavailable output root is not evidence of fanout.
-		}
-		if _, err := os.Lstat(output); !errors.Is(err, os.ErrNotExist) {
-			continue // Preserve a real parent output, or an ambiguous lookup.
 		}
 		parent.SeasonFanoutComplete = true
 		parent.ContentPath = ""
@@ -106,4 +100,53 @@ func (m *Manager) recoverCompletedSeasonFanouts(ctx context.Context) error {
 		m.logger.Info().Int("count", updated).Msg("Reconciled completed multi-season queue records")
 	}
 	return ctx.Err()
+}
+
+// Prove absence using a pinned, existing download tree. The persisted path
+// is user/provider-derived; validating its spelling alone does not protect
+// a later absolute-path lookup or distinguish an unavailable parent folder.
+func completedFanoutParentOutputAbsent(downloadRoot string, entry *storage.Entry) bool {
+	output, err := safeTorrentEntryDownloadPath(downloadRoot, entry)
+	if err != nil || (entry.ContentPath != "" && !sameFilesystemPath(entry.ContentPath, output)) {
+		return false
+	}
+	rooted, absoluteRoot, err := safepath.OpenRoot(downloadRoot)
+	if err != nil {
+		return false
+	}
+	defer rooted.Close()
+	relative, err := filepath.Rel(absoluteRoot, output)
+	if err != nil || relative == "." || !filepath.IsLocal(relative) {
+		return false
+	}
+
+	// Pin the existing save directory before checking the single release
+	// component. Root-relative filesystem operations cannot escape the
+	// configured directory even if an intermediate path changes.
+	releaseParent := rooted
+	parentRelative := filepath.Dir(relative)
+	if parentRelative != "." {
+		info, err := rooted.Lstat(parentRelative)
+		if err != nil {
+			return false
+		}
+		releaseParent, err = openStableLegacyDirectory(rooted, parentRelative, info)
+		if err != nil {
+			return false
+		}
+		defer releaseParent.Close()
+	}
+	leaf := filepath.Base(relative)
+	if err := safepath.ValidateIdentifier(leaf); err != nil {
+		return false
+	}
+	if err := rejectPortableTorrentSiblingAlias(releaseParent, ".", leaf); err != nil {
+		return false
+	}
+	if _, err := releaseParent.Lstat(leaf); !errors.Is(err, os.ErrNotExist) {
+		return false // Preserve existing output and ambiguous lookups.
+	}
+	// A renamed, detached, or otherwise changed save directory is not
+	// evidence that the visible import path is absent.
+	return safepath.VerifyOpenRoot(releaseParent, filepath.Dir(output)) == nil
 }

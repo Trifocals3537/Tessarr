@@ -2,10 +2,13 @@ package manager
 
 import (
 	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
+	"github.com/Trifocals3537/tessarr/internal/config"
 	debridTypes "github.com/Trifocals3537/tessarr/pkg/debrid/types"
+	"github.com/Trifocals3537/tessarr/pkg/storage"
 )
 
 func TestRecoverCompletedSeasonFanouts(t *testing.T) {
@@ -66,5 +69,39 @@ func TestRecoverCompletedSeasonFanouts(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestCompletedFanoutParentOutputAbsenceRequiresOwnedDirectory(t *testing.T) {
+	root := t.TempDir()
+	save := filepath.Join(root, "category", "nested")
+	entry := &storage.Entry{
+		Protocol: config.ProtocolTorrent, InfoHash: "fixture-parent",
+		Name: "Release", OutputName: "Release", SavePath: save,
+	}
+	entry.ContentPath = entry.DownloadPath()
+	if completedFanoutParentOutputAbsent(root, entry) {
+		t.Fatal("missing save directory was treated as an absent import")
+	}
+	if err := os.MkdirAll(save, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if !completedFanoutParentOutputAbsent(root, entry) {
+		t.Fatal("genuinely absent release in an existing owned save directory was not recognized")
+	}
+
+	// A portable spelling alias is ambiguous on different filesystems.
+	if err := os.Mkdir(filepath.Join(save, "release"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if completedFanoutParentOutputAbsent(root, entry) {
+		t.Fatal("existing portable alias was treated as an absent import")
+	}
+
+	outside := *entry
+	outside.SavePath = t.TempDir()
+	outside.ContentPath = outside.DownloadPath()
+	if completedFanoutParentOutputAbsent(root, &outside) {
+		t.Fatal("an unrelated save directory was treated as owned")
 	}
 }

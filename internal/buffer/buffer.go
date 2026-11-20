@@ -151,6 +151,14 @@ type Buffer struct {
 	file     *os.File
 	diskTemp bool // remove the file on Close
 
+	// ioMu fences physical reclamation against every read and write. Discard
+	// first removes logical presence, then punches the backing file. Neither
+	// a lock-free disk read nor a refill may cross that interval, otherwise
+	// a pread can deliver a hole or a delayed punch can erase new data.
+	// Take ioMu before mu; reads and writes share it, including disjoint
+	// write-through operations. Only reclamation and close are exclusive.
+	ioMu sync.RWMutex
+
 	// mu guards blocks, the LRU list, bytesInRAM, and ranges. Reads
 	// (ReadAt, HasRange, Present, Stats) take RLock so multiple readers
 	// can hit RAM-cached blocks or pread from disk in parallel. Writers
@@ -216,6 +224,9 @@ type Buffer struct {
 	statsWriteThrough atomic.Int64
 	statsPunches      atomic.Int64
 	statsReclaimed    atomic.Int64
+
+	beforeFastDiskReadForTest func()
+	beforeDiscardPunchForTest func()
 }
 
 // newBuffer creates a Buffer bound to pool p. Callers go through
@@ -341,6 +352,8 @@ func newBuffer(p *Pool, cfg Config) (*Buffer, error) {
 //     stalled behind it the way an under-lock eviction flush would stall
 //     them.
 func (b *Buffer) WriteAt(p []byte, off int64) (int, error) {
+	b.ioMu.RLock()
+	defer b.ioMu.RUnlock()
 	if b.closed.Load() {
 		return 0, ErrClosed
 	}
@@ -472,6 +485,8 @@ func (b *Buffer) writeIntoBlockLocked(blk *block, lo, hi int, src []byte) error 
 // to distinguish "not yet fetched" from "fetched as zero bytes". Zero-fill
 // semantics would obscure that.
 func (b *Buffer) ReadAt(p []byte, off int64) (int, error) {
+	b.ioMu.RLock()
+	defer b.ioMu.RUnlock()
 	if b.closed.Load() {
 		return 0, ErrClosed
 	}
@@ -488,25 +503,17 @@ func (b *Buffer) ReadAt(p []byte, off int64) (int, error) {
 	}
 
 	// Fast path: if every block in the read range is stateFastDisk
-	// (fully on disk, no RAM block) we can bypass the lock, the range
-	// tree, and the block-map entirely and just pread. This is the
-	// "match baseline's pread-only hot path bit-for-bit" path, with one
-	// atomic.Load per block as the only overhead.
+	// (fully on disk, no RAM block) we can bypass the state lock, the range
+	// tree, and the block-map entirely and just pread.
 	//
 	// Safety relies on the same caller contract that the locked path
 	// does: a range being read isn't being concurrently written or
 	// Discarded. Under that contract no in-flight state transition can
 	// invalidate the snapshot we just took.
 	//
-	// One concurrent Discarder is NOT the caller: the pool's disk backstop
-	// (punchBehindWindow) punches everything below readHead-BackWindow on its
-	// own goroutine. Because this path preads after the lock-free state load
-	// with no re-validation, a punch landing between the two would read back a
-	// hole as zeros. The invariant that prevents it is the readHead contract:
-	// callers MUST publish a read head that covers off (SetReadHead(off) or
-	// lower) BEFORE issuing the read, so the backstop's ceiling sits at or
-	// below off-BackWindow and never reaches the range in flight. DFS's
-	// ReadAtContext does this before both the download and the read.
+	// The pool's independent disk backstop can race a seek or a reader's
+	// published read head. ioMu protects the state observation and pread
+	// from every physical hole punch, including those from the backstop.
 	if b.states != nil {
 		allFast := true
 		for cur := off; cur < end; cur = alignDown(cur) + blockSize {
@@ -517,6 +524,9 @@ func (b *Buffer) ReadAt(p []byte, off int64) (int, error) {
 			}
 		}
 		if allFast {
+			if b.beforeFastDiskReadForTest != nil {
+				b.beforeFastDiskReadForTest()
+			}
 			n, err := b.file.ReadAt(p, off)
 			if err != nil && !errors.Is(err, io.EOF) {
 				return n, fmt.Errorf("buffer: disk read at %d: %w", off, err)
@@ -598,9 +608,9 @@ func (b *Buffer) ReadAt(p []byte, off int64) (int, error) {
 // hole-punch on the disk file. After Discard returns, ReadAt for any
 // byte in the range returns ErrNotPresent until it is re-written.
 //
-// Non-blocking with respect to in-flight flushes for unrelated blocks.
-// If a dirty block straddles the discard boundary, the surviving portion
-// stays dirty and will be flushed normally.
+// Reclamation is mutually exclusive with reads and writes. If a dirty
+// block straddles the discard boundary, the surviving portion stays dirty
+// and will be flushed normally.
 func (b *Buffer) Discard(off, length int64) error {
 	if b.closed.Load() {
 		return ErrClosed
@@ -624,6 +634,8 @@ func (b *Buffer) Discard(off, length int64) error {
 // of present bytes reclaimed. It does NOT fire onEvict — that is the backstop's
 // job, since caller-initiated Discard already knows what it released.
 func (b *Buffer) discard(off, length int64) int64 {
+	b.ioMu.Lock()
+	defer b.ioMu.Unlock()
 	end := off + length
 
 	b.mu.Lock()
@@ -666,8 +678,11 @@ func (b *Buffer) discard(off, length int64) int64 {
 	}
 	b.mu.Unlock()
 
-	// Punch on disk outside the lock — file ops are thread-safe and the
-	// caller doesn't want to block other RAM-only readers behind a syscall.
+	// Keep the physical punch outside the range bookkeeping lock, but hold
+	// ioMu until it finishes so a fresh write cannot be punched out by us.
+	if b.beforeDiscardPunchForTest != nil {
+		b.beforeDiscardPunchForTest()
+	}
 	if err := punchHole(b.file, off, length); err == nil {
 		b.statsPunches.Add(1)
 		b.statsReclaimed.Add(removed)
@@ -817,6 +832,8 @@ func (b *Buffer) DropBehind(offset, margin int64) {
 // Sync forces all dirty in-memory blocks to disk and calls fsync.
 // Returns the first error encountered.
 func (b *Buffer) Sync() error {
+	b.ioMu.RLock()
+	defer b.ioMu.RUnlock()
 	if b.closed.Load() {
 		return ErrClosed
 	}
@@ -853,6 +870,8 @@ func (b *Buffer) Sync() error {
 // Buffer's whole RAM footprint returns to the OS the instant its owner
 // (DFS CacheItem idle eviction, Usenet SegmentCache teardown) closes it.
 func (b *Buffer) Close() error {
+	b.ioMu.Lock()
+	defer b.ioMu.Unlock()
 	if !b.closed.CompareAndSwap(false, true) {
 		return ErrClosed
 	}
@@ -920,14 +939,10 @@ func (b *Buffer) Close() error {
 // DFS's ReadAtContext both call this as playback advances, so eviction never
 // fights the data the reader is about to ask for.
 //
-// Contract for backstop safety (DiskLimit > 0): publish a read head that
-// covers the offset you are about to read BEFORE issuing that read. The disk
-// backstop punches everything below readHead-BackWindow, and the lock-free
-// fast read path does not re-validate after its state load — so a read whose
-// offset sits below the current readHead-BackWindow can race a punch and read
-// a hole back as zeros. Calling SetReadHead(off) first pulls the protected
-// frontier over the in-flight read and closes that window (notably on a
-// seek-back, where off is below the prior forward read head).
+// Publish a read head covering the next read before fetching or reading it
+// to avoid unnecessary eviction and re-fetches on a seek-back. The ioMu
+// fence makes concurrent reclamation safe even when previously published
+// heads no longer describe every active reader.
 func (b *Buffer) SetReadHead(off int64) {
 	if off < 0 {
 		off = 0

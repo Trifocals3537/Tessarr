@@ -7,9 +7,12 @@ import (
 	"io"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Trifocals3537/tessarr/internal/config"
+	"github.com/Trifocals3537/tessarr/internal/customerror"
 	"github.com/Trifocals3537/tessarr/internal/nntp"
+	"github.com/Trifocals3537/tessarr/pkg/manager/link"
 	"github.com/Trifocals3537/tessarr/pkg/storage"
 	"github.com/rs/zerolog"
 )
@@ -104,5 +107,71 @@ func TestRecordTerminalReadFailureHandlesWrappedUnexpectedEOF(t *testing.T) {
 	class, retryable := classifyTerminalReadFailure(errors.Join(errors.New("download failed"), io.ErrUnexpectedEOF))
 	if class != "unexpected_eof" || !retryable {
 		t.Fatalf("classification = %q/%v", class, retryable)
+	}
+}
+
+func TestTerminalReadFailureInvalidatesPreviouslyHealthyStatus(t *testing.T) {
+	store, err := storage.NewStorage(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	checked := time.Now().Add(-time.Hour).UTC()
+	entry := &storage.Entry{Name: "fixture-release", InfoHash: "fixture-hash", Protocol: config.ProtocolTorrent}
+	if err := store.SaveEntryHealth(&storage.EntryHealth{
+		EntryName: entry.Name, Protocol: entry.Protocol, Status: storage.HealthHealthy,
+		LastOKAt: checked, LastCheckedAt: checked, NextCheckDueAt: time.Now().Add(time.Hour),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	m := &Manager{storage: store, logger: zerolog.Nop()}
+	m.RecordTerminalReadFailure(entry, "fixture.mkv", 0, 4096, customerror.TorrentNotFoundError)
+	health, err := store.GetEntryHealth(entry.Name)
+	if err != nil || health.Status != storage.HealthUnknown || !health.Dirty ||
+		health.DirtyReason != "read_failure:content_missing" || len(health.FailedReads) != 1 ||
+		!health.LastOKAt.Equal(checked) || !health.LastCheckedAt.Equal(checked) || !health.NextCheckDueAt.IsZero() {
+		t.Fatalf("new read failure left misleading verified health: %+v %v", health, err)
+	}
+}
+
+func TestLocalReadDeferralsDoNotInvalidateDurableProbeProgress(t *testing.T) {
+	store, err := storage.NewStorage(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	entry := &storage.Entry{Name: "fixture-release", InfoHash: "fixture-hash", Protocol: config.ProtocolTorrent}
+	var logs bytes.Buffer
+	m := &Manager{storage: store, logger: zerolog.New(&logs)}
+	m.RecordTerminalReadFailure(entry, "fixture.mkv", 0, 1024, io.ErrUnexpectedEOF)
+	before, err := store.GetEntryHealth(entry.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	before.ProbeProgress = &storage.HealthProbeProgress{Revision: before.DirtyRevision, StartedAt: time.Now(), Verified: map[string]string{"other.mkv": "proof"}}
+	if err := store.SaveEntryHealth(before); err != nil {
+		t.Fatal(err)
+	}
+	linkCooldown := link.NewLinkError(errors.New("deferred"), link.CategoryThrottled, link.CodeLinkRefreshCooldown)
+	circuitCooldown := StreamError{Err: streamFileCircuitOpenError{}, Retryable: true}
+	for _, failure := range []error{linkCooldown, circuitCooldown, errors.Join(linkCooldown, circuitCooldown)} {
+		class, retryable := classifyTerminalReadFailure(failure)
+		if class != "local_cooldown" || !retryable {
+			t.Fatalf("local deferral misclassified: %s/%v", class, retryable)
+		}
+		m.RecordTerminalReadFailure(entry, "fixture.mkv", 1024, 1024, failure)
+	}
+	after, err := store.GetEntryHealth(entry.Name)
+	if err != nil || after.DirtyRevision != before.DirtyRevision || len(after.FailedReads) != 1 ||
+		after.ProbeProgress == nil || after.ProbeProgress.Verified["other.mkv"] != "proof" {
+		t.Fatalf("local cooldown discarded real health evidence: %+v %v", after, err)
+	}
+	if !strings.Contains(logs.String(), `"upstream_failure_observed":false`) {
+		t.Fatal("deferral was not distinguished in diagnostics")
+	}
+	m.RecordTerminalReadFailure(entry, "fixture.mkv", 1024, 1024, errors.Join(circuitCooldown, customerror.TorrentNotFoundError))
+	after, err = store.GetEntryHealth(entry.Name)
+	if err != nil || after.DirtyRevision <= before.DirtyRevision || len(after.FailedReads) != 2 || after.ProbeProgress != nil {
+		t.Fatalf("mixed failover hid a newly observed failure: %+v %v", after, err)
 	}
 }

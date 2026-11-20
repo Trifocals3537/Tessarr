@@ -182,3 +182,17 @@ func TestNZBCompletionResumedSymlinkStillRequiresReadableContent(t *testing.T) {
 		t.Fatal("failed readiness check replaced the output", err)
 	}
 }
+
+func TestNZBCompletionRejectsZeroFilledSymlink(t *testing.T) {
+	m, entry, metadata := newNZBCompletionTestManager(t, config.DownloadActionSymlink)
+	m.mountManager = &testCacheWarmMount{ready: true, opener: func(context.Context, string) (CacheWarmFile, error) {
+		return &readinessTestFile{size: 1024, zeroAll: true}, nil
+	}}
+	if err := m.processNZB(t.Context(), entry, metadata); !errors.Is(err, errImportReadinessZeroContent) {
+		t.Fatalf("zero-filled output was admitted: %v", err)
+	}
+	current, err := m.queue.GetTorrent(entry.InfoHash)
+	if err != nil || current.State != storage.EntryStateError || current.IsComplete {
+		t.Fatalf("zero-filled output reported complete: %+v %v", current, err)
+	}
+}

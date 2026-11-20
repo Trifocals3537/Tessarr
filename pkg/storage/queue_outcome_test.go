@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/Trifocals3537/tessarr/internal/config"
 	debridTypes "github.com/Trifocals3537/tessarr/pkg/debrid/types"
 )
 
@@ -27,6 +28,60 @@ func TestQueuedOutcomeCrashHelper(t *testing.T) {
 		t.Fatal(err)
 	}
 	os.Exit(86) // Deliberately bypass final Close/sync and OS-lock cleanup.
+}
+
+func TestSeasonFanoutCompletionDurability(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "db")
+	s, err := NewStorage(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if s != nil {
+			_ = s.Close()
+		}
+	})
+	parent := &Entry{InfoHash: "parent", Protocol: config.ProtocolTorrent, State: EntryStateDownloading}
+	child := &Entry{
+		InfoHash: "child", Protocol: config.ProtocolTorrent, State: EntryStateDownloading,
+		Status: debridTypes.TorrentStatusDownloading, FileScopeRestricted: true,
+		SeasonSource: &SeasonSource{InfoHash: parent.InfoHash, Season: 1}, SkipMultiSeason: true,
+	}
+	for _, entry := range []*Entry{parent, child} {
+		if err := s.AddQueue(entry); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := s.CommitQueuedOutcome(parent, QueueOutcome{
+		Kind: QueueOutcomeCompleted, ContentPath: "uncreated", SeasonFanoutComplete: true,
+	}); err == nil {
+		t.Fatal("fanout completion accepted an independently claimed path")
+	}
+	if _, err := s.CommitQueuedOutcome(parent, QueueOutcome{
+		Kind: QueueOutcomeCompleted, SeasonFanoutComplete: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.CommitQueuedOutcome(child, QueueOutcome{
+		Kind: QueueOutcomeCompleted, ContentPath: "season-output",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	s, err = NewStorage(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := s.GetQueued(parent.InfoHash)
+	if err != nil || !p.IsSeasonFanoutParent() || p.ContentPath != "" {
+		t.Fatalf("fanout marker lost after restart: %+v %v", p, err)
+	}
+	c, err := s.GetQueued(child.InfoHash)
+	if err != nil || !c.IsComplete || c.Status != debridTypes.TorrentStatusDownloaded || c.ContentPath != "season-output" || c.IsSeasonFanoutParent() {
+		t.Fatalf("completed child lost import state after restart: %+v %v", c, err)
+	}
 }
 
 func TestQueuedOutcomeReopensAfterCrashWithoutFinalSync(t *testing.T) {

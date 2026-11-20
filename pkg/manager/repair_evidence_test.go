@@ -3,6 +3,7 @@ package manager
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -12,11 +13,14 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/Trifocals3537/tessarr/internal/config"
+	"github.com/Trifocals3537/tessarr/internal/customerror"
 	"github.com/Trifocals3537/tessarr/internal/logger"
 	debrid "github.com/Trifocals3537/tessarr/pkg/debrid/common"
 	debridTypes "github.com/Trifocals3537/tessarr/pkg/debrid/types"
+	"github.com/Trifocals3537/tessarr/pkg/manager/link"
 	"github.com/Trifocals3537/tessarr/pkg/storage"
 	"github.com/puzpuzpuz/xsync/v4"
 	"github.com/rs/zerolog"
@@ -84,6 +88,102 @@ func TestHealthRollupRequiresEveryFile(t *testing.T) {
 				t.Fatalf("got %s want %s", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestDefinitiveRangeFailureRequiresAllProviders(t *testing.T) {
+	rejected := link.NewRefetchableError(link.ErrRepeatedLinkRejection, link.CodeRepeatedLinkRejection)
+	for _, tc := range []struct {
+		err  error
+		want bool
+	}{
+		{nil, false},
+		{rejected, true},
+		{fmt.Errorf("wrapped: %w", errors.Join(rejected, customerror.TorrentNotFoundError)), true},
+		{fmt.Errorf("wrapped: %w", errors.Join(rejected, context.DeadlineExceeded)), false},
+		{link.ClassifyHTTPStatus(http.StatusNotFound, nil), false},
+		{link.NewLinkError(errors.New("cooldown"), link.CategoryThrottled, link.CodeLinkRefreshCooldown), false},
+		{customerror.UsenetSegmentMissingError, true},
+	} {
+		if got := isDefinitiveRangeFailure(tc.err); got != tc.want {
+			t.Errorf("definitive(%v) = %v, want %v", tc.err, got, tc.want)
+		}
+	}
+}
+
+func TestHealthRepeatedLinkRejectionMarksOnlyFailedFile(t *testing.T) {
+	r, entry, item := newEvidenceRepair(t, 3)
+	const failedName = "video-002.mkv"
+	// A generic provider check can itself be inconclusive. The direct range
+	// is stronger evidence about the playback failure that was recorded.
+	r.manager.clients.Store("primary", &healthEvidenceClient{check: func(_ context.Context, name string) error {
+		if name == failedName {
+			return errors.New("generic check unavailable")
+		}
+		return nil
+	}})
+	service := &failoverLinkService{errs: map[string]error{
+		"primary": link.NewRefetchableError(link.ErrRepeatedLinkRejection, link.CodeRepeatedLinkRejection),
+	}}
+	m := newStreamFailoverTestManager(service, http.DefaultClient, "primary")
+	m.storage, m.clients = r.manager.storage, r.manager.clients
+	r = NewRepair(m)
+	failed := storage.FailedReadRange{
+		InfoHash: entry.InfoHash, FileName: failedName, FileID: item.Files[failedName].ID, Offset: 100, Length: 20,
+	}
+	if err := m.storage.RecordFailedRead(item.Name, entry.Protocol, "read_failure:"+link.CodeRepeatedLinkRejection, failed); err != nil {
+		t.Fatal(err)
+	}
+	health := r.probeEntry(t.Context(), "test", &candidate{name: item.Name}, newHealCache(), RepairRunOptions{}, false)
+	if health == nil || health.Status != storage.HealthBroken || health.BrokenCount != 1 ||
+		len(health.BrokenFiles) != 1 || health.BrokenFiles[0].FileName != failedName ||
+		health.BrokenFiles[0].Reason != link.CodeRepeatedLinkRejection {
+		t.Fatalf("targeted persistent read failure was not diagnosed: %+v", health)
+	}
+	persisted, err := m.GetEntry(entry.InfoHash)
+	if err != nil || persisted.Bad {
+		t.Fatalf("a single broken member incorrectly invalidated the whole pack: %+v %v", persisted, err)
+	}
+}
+
+func TestHealthProbePrioritizesKnownFailedRanges(t *testing.T) {
+	r, entry, item := newEvidenceRepair(t, 6)
+	const failedName = "video-005.mkv"
+	if err := r.manager.storage.RecordFailedRead(item.Name, entry.Protocol, "read_failure:timeout", storage.FailedReadRange{
+		InfoHash: entry.InfoHash, FileName: failedName, Offset: 10, Length: 20,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	calls := make(chan string, 6)
+	r.manager.clients.Store("primary", &healthEvidenceClient{check: func(ctx context.Context, name string) error {
+		calls <- name
+		<-ctx.Done()
+		return ctx.Err()
+	}})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		r.probeEntry(ctx, "test", &candidate{name: item.Name}, newHealCache(), RepairRunOptions{}, false)
+	}()
+	defer func() {
+		cancel()
+		<-done
+	}()
+	firstBatch := make([]string, 0, 2)
+	for range 2 {
+		select {
+		case name := <-calls:
+			firstBatch = append(firstBatch, name)
+		case <-time.After(time.Second):
+			t.Fatal("initial file probes did not start")
+		}
+	}
+	cancel()
+	<-done
+	if firstBatch[0] != failedName && firstBatch[1] != failedName {
+		t.Fatalf("known failed range starved behind unrelated files: %v", firstBatch)
 	}
 }
 

@@ -15,6 +15,10 @@ type ErrorCategory int
 // an observed provider throttle. It still uses the normal backoff semantics.
 const CodeLinkRefreshCooldown = "link_refresh_cooldown"
 
+// CodeRepeatedLinkRejection denotes evidence from several independently
+// rejected replacements, not merely an open local cooldown.
+const CodeRepeatedLinkRejection = "repeated_link_rejection"
+
 const (
 	// CategoryPermanent - Don't retry (file deleted, unauthorized)
 	CategoryPermanent ErrorCategory = iota
@@ -107,17 +111,18 @@ func (e *Error) IsPermanent() bool {
 
 // Sentinel errors
 var (
-	ErrUnauthorized        = errors.New("unauthorized access to download link")
-	ErrLinkNotFound        = errors.New("download link not found")
-	ErrBandwidthExceeded   = errors.New("bandwidth limit exceeded")
-	ErrInvalidDownloadCode = errors.New("invalid download code")
-	ErrLinkExpired         = errors.New("download link expired")
-	ErrFileNotAvailable    = errors.New("file not available for download")
-	ErrNoActiveAccount     = errors.New("no active account available")
-	ErrClientNotFound      = errors.New("debrid client not found")
-	ErrPlacementNotFound   = errors.New("placement not found for entry")
-	ErrFileMissing         = errors.New("file missing in entry")
-	ErrEmptyLink           = errors.New("download link is empty")
+	ErrUnauthorized          = errors.New("unauthorized access to download link")
+	ErrLinkNotFound          = errors.New("download link not found")
+	ErrBandwidthExceeded     = errors.New("bandwidth limit exceeded")
+	ErrInvalidDownloadCode   = errors.New("invalid download code")
+	ErrRepeatedLinkRejection = errors.New("replacement links repeatedly rejected for this file")
+	ErrLinkExpired           = errors.New("download link expired")
+	ErrFileNotAvailable      = errors.New("file not available for download")
+	ErrNoActiveAccount       = errors.New("no active account available")
+	ErrClientNotFound        = errors.New("debrid client not found")
+	ErrPlacementNotFound     = errors.New("placement not found for entry")
+	ErrFileMissing           = errors.New("file missing in entry")
+	ErrEmptyLink             = errors.New("download link is empty")
 )
 
 // HTTP error sentinels

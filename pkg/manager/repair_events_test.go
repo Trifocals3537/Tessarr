@@ -189,6 +189,133 @@ func TestRepairEventQueueBootstrapsDurableDirtyRecords(t *testing.T) {
 	}
 }
 
+func TestRepairEventRescanRevisitsDroppedAndIncompleteRecords(t *testing.T) {
+	store, err := storage.NewStorage(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	names := []string{"alpha", "beta", "gamma"}
+	for _, name := range names {
+		if err := store.RecordFailedRead(name, config.ProtocolTorrent, "read_failure:timeout", storage.FailedReadRange{
+			InfoHash: "fixture-" + name, FileName: "demo.mkv", Offset: 0, Length: 1,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	r := NewRepair(&Manager{storage: store})
+	r.eventCapacity = 1
+	r.eventCooldown = 25 * time.Millisecond
+	r.eventRescanInterval = 10 * time.Millisecond
+	// Model startup with more durable events than the bounded queue accepts.
+	r.eventStarted = true
+	r.enqueuePersistedDirty()
+	r.eventStarted = false
+	if len(r.eventQueue) != 1 {
+		t.Fatal("fixture failed to exercise bounded admission")
+	}
+	attempts := make(map[string]int)
+	completed := make(chan string, len(names))
+	r.eventProcess = func(_ context.Context, name string) repairEventOutcome {
+		attempts[name]++
+		if attempts[name] == 1 {
+			return repairEventIncomplete
+		}
+		health, err := store.GetEntryHealth(name)
+		if err != nil {
+			return repairEventIncomplete
+		}
+		health.Dirty, health.DirtyReason, health.Status = false, "", storage.HealthHealthy
+		health.FailedReads = nil
+		if err := store.SaveEntryHealth(health); err != nil {
+			return repairEventIncomplete
+		}
+		if attempts[name] == 2 {
+			completed <- name
+		}
+		return repairEventHealthy
+	}
+	if err := r.startEventWorker(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		r.stopEventWorker()
+		r.runWG.Wait()
+	}()
+	got := make(map[string]bool)
+	deadline := time.NewTimer(3 * time.Second)
+	defer deadline.Stop()
+	for len(got) < len(names) {
+		select {
+		case name := <-completed:
+			got[name] = true
+		case <-deadline.C:
+			t.Fatalf("dirty records stranded without a new read signal: %v", got)
+		}
+	}
+}
+
+func TestRepairEventDurableRescanIsNotANewFailure(t *testing.T) {
+	store, err := storage.NewStorage(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if err := store.MarkEntryDirtyChecked("alpha", config.ProtocolTorrent, "fixture"); err != nil {
+		t.Fatal(err)
+	}
+	r := NewRepair(&Manager{storage: store})
+	r.eventStarted = true
+	r.enqueuePersistedDirty()
+	work, ok := r.nextDirtyEvent()
+	if !ok {
+		t.Fatal("missing original work")
+	}
+	r.enqueuePersistedDirty() // the same persisted dirty revision is in flight
+	if outcome := r.finishDirtyEvent(work, repairEventHealthy); outcome != repairEventHealthy {
+		t.Fatalf("rescan invalidated an unchanged probe: %s", outcome)
+	}
+}
+
+func TestRepairEventPeriodicRescanLeavesOrdinaryDirtyEntriesForSweep(t *testing.T) {
+	store, err := storage.NewStorage(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if err := store.MarkEntryDirtyChecked("ordinary-change", config.ProtocolTorrent, "entry_item_changed"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.MarkEntryDirtyChecked("interrupted-check", config.ProtocolTorrent, "health_recheck_incomplete"); err != nil {
+		t.Fatal(err)
+	}
+	r := NewRepair(&Manager{storage: store})
+	r.eventStarted = true
+	r.enqueuePersistedDirtyContext(t.Context(), false)
+	work, ok := r.nextDirtyEvent()
+	if !ok || work.entryName != "interrupted-check" || r.eventQueueStatus().Pending != 0 {
+		t.Fatalf("periodic rescan admitted unrelated library changes: %+v, %v", work, ok)
+	}
+}
+
+func TestRepairEventWaitingForSweepGateIsCancelable(t *testing.T) {
+	r := NewRepair(&Manager{})
+	r.eventProbeMu.Lock()
+	defer r.eventProbeMu.Unlock()
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan repairEventOutcome, 1)
+	go func() { done <- r.processDirtyEvent(ctx, "alpha") }()
+	cancel()
+	select {
+	case outcome := <-done:
+		if outcome != repairEventIncomplete {
+			t.Fatalf("unexpected canceled outcome: %s", outcome)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("event worker could not stop while a sweep held the probe gate")
+	}
+}
+
 func TestRepairEventIncompleteProbePreservesDirtyState(t *testing.T) {
 	store, err := storage.NewStorage(t.TempDir())
 	if err != nil {

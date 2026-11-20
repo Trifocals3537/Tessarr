@@ -9,6 +9,8 @@ import (
 	"fmt"
 	"io"
 	"maps"
+	"net/http"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -107,6 +109,12 @@ func failedRangesFor(h *storage.EntryHealth, item *storage.EntryItem) (map[strin
 
 func (r *Repair) probeFilesWithEvidence(ctx context.Context, c *candidate, h *storage.EntryHealth, names []string, opts RepairRunOptions) []fileResult {
 	ranges, evidenceErr := failedRangesFor(h, c.item)
+	// On large packs, probe the exact failures before unrelated files. A
+	// bounded event recheck should make progress on the reported failure even
+	// when it cannot visit every file in one pass.
+	sort.SliceStable(names, func(i, j int) bool {
+		return len(ranges[names[i]]) > 0 && len(ranges[names[j]]) == 0
+	})
 	fingerprint := storage.EntryItemRepairFingerprint(c.item)
 	mode := fmt.Sprintf("v2:content=true:unrestrict=%t:scope=%s", opts.UnrestrictLink, r.effectiveProtocolScope(opts))
 	if h.ProbeProgress == nil || h.ProbeProgress.Revision != h.DirtyRevision || h.ProbeProgress.Fingerprint != fingerprint || h.ProbeProgress.Mode != mode || h.ProbeProgress.StartedAt.IsZero() || time.Since(h.ProbeProgress.StartedAt) > 24*time.Hour {
@@ -143,13 +151,18 @@ func (r *Repair) probeFilesWithEvidence(ctx context.Context, c *candidate, h *st
 				// supported NZB heads, with the existing global slot limit.
 				probeOpts.VerifyContent = true
 				res = r.probeFile(gctx, c.item, name, probeOpts)
-				if res.healthy && len(ranges[name]) > 0 {
+				checkKnownRange := res.healthy || (res.protocol == config.ProtocolTorrent && !res.broken &&
+					(res.reason == "provider_check_unsupported" || res.reason == "provider_probe_error" || res.reason == "unrestrict_link_error"))
+				if gctx.Err() == nil && checkKnownRange && len(ranges[name]) > 0 {
 					if err := r.verifyFailedRanges(gctx, res, c.item.Files[name], ranges[name]); err != nil {
 						res.healthy = false
 						res.reason = "failed_range_check_incomplete"
 						if isDefinitiveRangeFailure(err) {
 							res.broken = true
 							res.reason = "failed_range_unavailable"
+							if isRepeatedLinkRejection(err) {
+								res.reason = link.CodeRepeatedLinkRejection
+							}
 						}
 					}
 				}
@@ -208,7 +221,22 @@ func (r *Repair) probeFilesWithEvidence(ctx context.Context, c *candidate, h *st
 type boundedProbeWriter struct{ remaining int64 }
 
 func isDefinitiveRangeFailure(err error) bool {
-	return nntp.IsArticleNotFoundError(err) || errors.Is(err, customerror.UsenetSegmentMissingError) || errors.Is(err, customerror.UsenetCorruptContentError)
+	return allReadFailureCauses(err, func(cause error) bool {
+		if cause == link.ErrRepeatedLinkRejection || explicitUnavailableLink(cause) ||
+			cause == customerror.UsenetSegmentMissingError || cause == customerror.UsenetCorruptContentError {
+			return true
+		}
+		switch e := cause.(type) {
+		case *nntp.Error:
+			return e != nil && e.Type == nntp.ErrorTypeArticleNotFound
+		case *customerror.Error:
+			// A provider's explicit missing-content response is different
+			// from a signed CDN URL's first, refetchable 404/410.
+			return e != nil && !e.IsRetryable() && (e.HTTPStatus() == http.StatusNotFound || e.HTTPStatus() == http.StatusGone)
+		default:
+			return false
+		}
+	})
 }
 func (w *boundedProbeWriter) Write(p []byte) (int, error) {
 	if int64(len(p)) > w.remaining {

@@ -575,6 +575,11 @@ func (s *Storage) markEntryDirtyLocked(entryName string, protocol config.Protoco
 	state.ProbeProgress = nil
 	if failed != nil {
 		addFailedRead(state, *failed)
+		// Preserve last verified timestamps, but a new failed range makes
+		// the current health unknown until that evidence is reconciled.
+		if state.Status == HealthHealthy {
+			state.Status = HealthUnknown
+		}
 	}
 	if failed == nil && missingLegacyReadEvidence(state) {
 		state.FailedReadsIncomplete = true

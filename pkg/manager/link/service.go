@@ -107,21 +107,22 @@ func lifecyclePolicyKey(ctx context.Context, key string) string {
 // Service handles download link fetching and validation.
 // It uses the account-level cache for storing links and only tracks validation state.
 type Service struct {
-	validated       *xsync.Map[string, struct{}]
-	singleflight    singleflight.Group
-	refreshflight   singleflight.Group
-	refreshMu       sync.Mutex
-	refreshBackoffs map[string]refreshBackoffState
-	clients         *xsync.Map[string, debrid.Client]
-	entryRefresher  EntryRefresher
-	repairer        EntryRepairer
-	entrySaver      EntrySaver
-	providerType    ProviderTypeResolver
-	httpClient      *http.Client
-	retries         int
-	wait            func(context.Context, time.Duration) error
-	now             func() time.Time
-	logger          zerolog.Logger
+	validated             *xsync.Map[string, struct{}]
+	singleflight          singleflight.Group
+	refreshflight         singleflight.Group
+	refreshMu             sync.Mutex
+	refreshBackoffs       map[string]refreshBackoffState
+	replacementRejections map[string]replacementRejectionState
+	clients               *xsync.Map[string, debrid.Client]
+	entryRefresher        EntryRefresher
+	repairer              EntryRepairer
+	entrySaver            EntrySaver
+	providerType          ProviderTypeResolver
+	httpClient            *http.Client
+	retries               int
+	wait                  func(context.Context, time.Duration) error
+	now                   func() time.Time
+	logger                zerolog.Logger
 }
 
 // New creates a new LinkService
@@ -230,6 +231,7 @@ func (s *Service) fetchAndValidate(ctx context.Context, entry *storage.Entry, fi
 	// allowed to recover on the next request.
 	if _, exists := s.validated.Load(validationKey(link)); exists && s.accountValidationIsCurrent(link) {
 		s.clearRefreshBackoff(lifecyclePolicyKey(ctx, linkLifecycleKey(entry, filename)))
+		s.clearReplacementRejections(replacementRejectionKey(entry, filename))
 		return link, nil
 	}
 	s.validated.Delete(validationKey(link))
@@ -279,6 +281,7 @@ func (s *Service) fetchAndValidate(ctx context.Context, entry *storage.Entry, fi
 	}
 
 	s.completeRecoveryProbe(link)
+	s.clearReplacementRejections(replacementRejectionKey(entry, filename))
 	if !s.accountValidationIsCurrent(link) {
 		// Another request suspended or permanently disabled the account while
 		// this validation was in flight. The successful URL may serve this
@@ -298,7 +301,8 @@ func (s *Service) fetchAndValidate(ctx context.Context, entry *storage.Entry, fi
 // callers continue probing the cached CDN URL for recovery, but do not repeatedly
 // regenerate provider links while that URL remains rejected.
 func (s *Service) refreshRejectedLink(ctx context.Context, entry *storage.Entry, filename string, rejected types.DownloadLink, repairAttempt, linkRefreshes int) (types.DownloadLink, error) {
-	key := lifecyclePolicyKey(ctx, linkLifecycleKey(entry, filename))
+	baseKey := linkLifecycleKey(entry, filename)
+	key := lifecyclePolicyKey(ctx, baseKey)
 	return doLinkFlight(ctx, &s.refreshflight, key, func(sharedCtx context.Context) (types.DownloadLink, error) {
 		if err := sharedCtx.Err(); err != nil {
 			return emptyDownloadLink, err
@@ -321,6 +325,7 @@ func (s *Service) refreshRejectedLink(ctx context.Context, entry *storage.Entry,
 			if linkErr := GetLinkError(err); linkErr != nil && linkErr.ShouldRefetch() &&
 				!errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
 				delay, failures := s.recordRefreshFailure(key)
+				confirmed := s.noteReplacementRejection(replacementRejectionKey(entry, filename), linkErr.Code)
 				s.logger.Warn().
 					Str("debrid", entry.ActiveProvider).
 					Str("infohash", entry.InfoHash).
@@ -329,8 +334,17 @@ func (s *Service) refreshRejectedLink(ctx context.Context, entry *storage.Entry,
 					Str("error_category", linkErr.Category.String()).
 					Str("failure_scope", "download_link").
 					Int("failures", failures).
+					Bool("persistent_rejection", confirmed).
 					Dur("retry_after", delay).
 					Msg("Download link replacement was rejected; deferring provider refresh")
+				if confirmed {
+					// This is current evidence of an unavailable file, not a
+					// permanent provider or pack failure. Preserve future
+					// refresh/failover eligibility and the bounded cooldown.
+					return emptyDownloadLink, NewRefetchableError(ErrRepeatedLinkRejection, CodeRepeatedLinkRejection)
+				}
+			} else if !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
+				s.clearReplacementRejections(replacementRejectionKey(entry, filename))
 			}
 			return emptyDownloadLink, err
 		}
@@ -973,5 +987,6 @@ func (s *Service) Clear() {
 	s.validated.Clear()
 	s.refreshMu.Lock()
 	clear(s.refreshBackoffs)
+	clear(s.replacementRejections)
 	s.refreshMu.Unlock()
 }

@@ -380,6 +380,8 @@ type EntryProto struct {
 	// a normal entry or a legacy season child lacking a validated source.
 	SeasonSourceInfoHash string `protobuf:"bytes,51,opt,name=season_source_info_hash,json=seasonSourceInfoHash,proto3" json:"season_source_info_hash,omitempty"`
 	SeasonSourceNumber   int32  `protobuf:"varint,52,opt,name=season_source_number,json=seasonSourceNumber,proto3" json:"season_source_number,omitempty"`
+	// A completed queue-only fanout parent has no independent import path.
+	SeasonFanoutComplete bool `protobuf:"varint,53,opt,name=season_fanout_complete,json=seasonFanoutComplete,proto3" json:"season_fanout_complete,omitempty"`
 	unknownFields        protoimpl.UnknownFields
 	sizeCache            protoimpl.SizeCache
 }
@@ -776,6 +778,13 @@ func (x *EntryProto) GetSeasonSourceNumber() int32 {
 		return x.SeasonSourceNumber
 	}
 	return 0
+}
+
+func (x *EntryProto) GetSeasonFanoutComplete() bool {
+	if x != nil {
+		return x.SeasonFanoutComplete
+	}
+	return false
 }
 
 type EntryItemProto struct {
@@ -1390,7 +1399,7 @@ const file_pkg_storage_storage_proto_rawDesc = "" +
 	"\n" +
 	"FilesEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x120\n" +
-	"\x05value\x18\x02 \x01(\v2\x1a.storage.ProviderFileProtoR\x05value:\x028\x01\"\xd6\x10\n" +
+	"\x05value\x18\x02 \x01(\v2\x1a.storage.ProviderFileProtoR\x05value:\x028\x01\"\x8c\x11\n" +
 	"\n" +
 	"EntryProto\x12\x1a\n" +
 	"\bprotocol\x18\x01 \x01(\tR\bprotocol\x12\x1b\n" +
@@ -1450,7 +1459,8 @@ const file_pkg_storage_storage_proto_rawDesc = "" +
 	"\x19admission_uncached_policy\x181 \x01(\tR\x17admissionUncachedPolicy\x122\n" +
 	"\x15file_scope_restricted\x182 \x01(\bR\x13fileScopeRestricted\x125\n" +
 	"\x17season_source_info_hash\x183 \x01(\tR\x14seasonSourceInfoHash\x120\n" +
-	"\x14season_source_number\x184 \x01(\x05R\x12seasonSourceNumber\x1aY\n" +
+	"\x14season_source_number\x184 \x01(\x05R\x12seasonSourceNumber\x124\n" +
+	"\x16season_fanout_complete\x185 \x01(\bR\x14seasonFanoutComplete\x1aY\n" +
 	"\x0eProvidersEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x121\n" +
 	"\x05value\x18\x02 \x01(\v2\x1b.storage.ProviderEntryProtoR\x05value:\x028\x01\x1aL\n" +

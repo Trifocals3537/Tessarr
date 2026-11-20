@@ -70,6 +70,7 @@ const (
 	repairEventQueueCapacity     = 256
 	repairEventProbeTimeout      = 2 * time.Minute
 	repairEventCooldown          = 2 * time.Minute
+	repairEventRescanInterval    = time.Minute
 	repairEventHistoryCapacity   = 4096
 )
 
@@ -98,45 +99,47 @@ type Repair struct {
 	// Runtime read failures feed a single bounded worker. Durable dirty health
 	// records remain the source of truth; this queue only shortens the time to
 	// a non-destructive recheck.
-	eventMu           sync.Mutex
-	eventQueue        []string
-	eventQueued       map[string]struct{}
-	eventGeneration   map[string]uint64
-	eventLast         map[string]time.Time
-	eventSignal       chan struct{}
-	eventCancel       context.CancelFunc
-	eventStarted      bool
-	eventCurrent      string
-	eventProbeMu      sync.Mutex
-	eventCapacity     int
-	eventCooldown     time.Duration
-	eventProbeTimeout time.Duration
-	eventNow          func() time.Time
-	eventProcess      func(context.Context, string) repairEventOutcome
-	eventProcessed    atomic.Uint64
-	eventHealthy      atomic.Uint64
-	eventBroken       atomic.Uint64
-	eventIncomplete   atomic.Uint64
-	eventCoalesced    atomic.Uint64
-	eventDropped      atomic.Uint64
+	eventMu             sync.Mutex
+	eventQueue          []string
+	eventQueued         map[string]struct{}
+	eventGeneration     map[string]uint64
+	eventLast           map[string]time.Time
+	eventSignal         chan struct{}
+	eventCancel         context.CancelFunc
+	eventStarted        bool
+	eventCurrent        string
+	eventProbeMu        sync.Mutex
+	eventCapacity       int
+	eventCooldown       time.Duration
+	eventRescanInterval time.Duration
+	eventProbeTimeout   time.Duration
+	eventNow            func() time.Time
+	eventProcess        func(context.Context, string) repairEventOutcome
+	eventProcessed      atomic.Uint64
+	eventHealthy        atomic.Uint64
+	eventBroken         atomic.Uint64
+	eventIncomplete     atomic.Uint64
+	eventCoalesced      atomic.Uint64
+	eventDropped        atomic.Uint64
 }
 
 // NewRepair builds the repair service for the given manager. Call
 // Repair.Start to register the recurring sweep with the scheduler.
 func NewRepair(m *Manager) *Repair {
 	return &Repair{
-		manager:           m,
-		scheduler:         m.scheduler,
-		logger:            logger.New("repair"),
-		parentCtx:         context.Background(),
-		eventQueued:       make(map[string]struct{}),
-		eventGeneration:   make(map[string]uint64),
-		eventLast:         make(map[string]time.Time),
-		eventSignal:       make(chan struct{}, 1),
-		eventCapacity:     repairEventQueueCapacity,
-		eventCooldown:     repairEventCooldown,
-		eventProbeTimeout: repairEventProbeTimeout,
-		eventNow:          time.Now,
+		manager:             m,
+		scheduler:           m.scheduler,
+		logger:              logger.New("repair"),
+		parentCtx:           context.Background(),
+		eventQueued:         make(map[string]struct{}),
+		eventGeneration:     make(map[string]uint64),
+		eventLast:           make(map[string]time.Time),
+		eventSignal:         make(chan struct{}, 1),
+		eventCapacity:       repairEventQueueCapacity,
+		eventCooldown:       repairEventCooldown,
+		eventRescanInterval: repairEventRescanInterval,
+		eventProbeTimeout:   repairEventProbeTimeout,
+		eventNow:            time.Now,
 	}
 }
 

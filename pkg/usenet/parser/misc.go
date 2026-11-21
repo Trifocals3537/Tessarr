@@ -71,7 +71,7 @@ func determineExtension(group *FileGroup) string {
 }
 
 func getNZBSegments(index int, file nzbparser.NzbFile, group *FileGroup) (int64, []storage.NZBSegment) {
-	if !sortAndValidateSegments(file.Segments) {
+	if err := sortAndValidateSegments(file.Segments); err != nil {
 		return 0, nil
 	}
 	var fileSize, segmentSize int64

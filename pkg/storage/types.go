@@ -109,6 +109,9 @@ type Entry struct {
 	// season child. Persist it so restart recovery never treats the synthetic
 	// child hash as an independent provider torrent or mounted source.
 	SeasonSource *SeasonSource `msgpack:"season_source,omitempty" json:"-"`
+	// SeasonFanoutComplete is a queue-only parent whose action was fulfilled
+	// by its season children. It has no independent Arr import directory.
+	SeasonFanoutComplete bool `msgpack:"season_fanout_complete,omitempty" json:"season_fanout_complete,omitempty"`
 
 	State TorrentState `msgpack:"state" json:"state"` // This is for QBitTorrent compatibility
 	// Provider State (from active providerEntry)
@@ -168,6 +171,11 @@ func (e *Entry) IsTorrent() bool {
 
 func (e *Entry) IsNZB() bool {
 	return e.Protocol == config.ProtocolNZB
+}
+
+func (e *Entry) IsSeasonFanoutParent() bool {
+	return e != nil && e.IsTorrent() && !e.FileScopeRestricted && e.SeasonSource == nil &&
+		e.SeasonFanoutComplete && e.IsComplete && e.State == EntryStatePausedUP
 }
 
 // ObserveTransfer records a successful provider poll without conflating it
@@ -1007,6 +1015,13 @@ func (e *Entry) MarkAsCompleted(contentPath string) {
 	e.IsComplete = true
 	e.Progress = 1.0
 	e.ContentPath = contentPath
+	e.SeasonFanoutComplete = false
+	// Synthetic children have no independent provider transfer. Leaving
+	// their initial "downloading" status after the action completes makes
+	// the queue report contradictory local/provider states forever.
+	if e.IsTorrent() && e.FileScopeRestricted {
+		e.Status = debridTypes.TorrentStatusDownloaded
+	}
 	now := time.Now()
 	e.CompletedAt = &now
 	e.UpdatedAt = now
@@ -1017,6 +1032,7 @@ func (e *Entry) MarkAsError(err error) {
 	e.State = EntryStateError
 	e.Status = debridTypes.TorrentStatusError
 	e.IsDownloading = false
+	e.SeasonFanoutComplete = false
 	e.LastError = err.Error()
 	e.ErrorCount++
 	now := time.Now()

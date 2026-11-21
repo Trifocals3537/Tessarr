@@ -2,6 +2,7 @@ package manager
 
 import (
 	"context"
+	"fmt"
 	"slices"
 	"sync/atomic"
 	"testing"
@@ -186,6 +187,186 @@ func TestRepairEventQueueBootstrapsDurableDirtyRecords(t *testing.T) {
 	r.enqueuePersistedDirty()
 	if status := r.eventQueueStatus(); status.Pending != 2 {
 		t.Fatalf("event queue status = %+v, want two durable dirty records", status)
+	}
+}
+
+func TestRepairEventRescanRevisitsDroppedAndIncompleteRecords(t *testing.T) {
+	store, err := storage.NewStorage(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	names := []string{"alpha", "beta", "gamma"}
+	for _, name := range names {
+		if err := store.RecordFailedRead(name, config.ProtocolTorrent, "read_failure:timeout", storage.FailedReadRange{
+			InfoHash: "fixture-" + name, FileName: "demo.mkv", Offset: 0, Length: 1,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	r := NewRepair(&Manager{storage: store})
+	r.eventCapacity = 1
+	r.eventCooldown = 25 * time.Millisecond
+	r.eventRescanInterval = 10 * time.Millisecond
+	// Model startup with more durable events than the bounded queue accepts.
+	r.eventStarted = true
+	r.enqueuePersistedDirty()
+	r.eventStarted = false
+	if len(r.eventQueue) != 1 {
+		t.Fatal("fixture failed to exercise bounded admission")
+	}
+	attempts := make(map[string]int)
+	completed := make(chan string, len(names))
+	r.eventProcess = func(_ context.Context, name string) repairEventOutcome {
+		attempts[name]++
+		if attempts[name] == 1 {
+			return repairEventIncomplete
+		}
+		health, err := store.GetEntryHealth(name)
+		if err != nil {
+			return repairEventIncomplete
+		}
+		health.Dirty, health.DirtyReason, health.Status = false, "", storage.HealthHealthy
+		health.FailedReads = nil
+		if err := store.SaveEntryHealth(health); err != nil {
+			return repairEventIncomplete
+		}
+		if attempts[name] == 2 {
+			completed <- name
+		}
+		return repairEventHealthy
+	}
+	if err := r.startEventWorker(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		r.stopEventWorker()
+		r.runWG.Wait()
+	}()
+	got := make(map[string]bool)
+	deadline := time.NewTimer(3 * time.Second)
+	defer deadline.Stop()
+	for len(got) < len(names) {
+		select {
+		case name := <-completed:
+			got[name] = true
+		case <-deadline.C:
+			t.Fatalf("dirty records stranded without a new read signal: %v", got)
+		}
+	}
+}
+
+func TestRepairEventRescanProgressesPastPermanentlyUnresolvedPrefix(t *testing.T) {
+	store, err := storage.NewStorage(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	r := NewRepair(&Manager{storage: store})
+	r.eventCapacity = 3
+	r.eventStarted = true
+	now := time.Now()
+	r.eventNow = func() time.Time { return now }
+
+	// More than six queue capacities of permanently unresolved dirty rows.
+	// Nothing rewrites the prefix or moves it to the end of the health log.
+	const total = 20
+	for i := range total {
+		name := fmt.Sprintf("entry-%03d", i)
+		if err := store.MarkEntryDirtyChecked(name, config.ProtocolTorrent, "read_failure:timeout"); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	seen := make(map[string]bool)
+	for page := 0; page < (total+r.eventCapacity-1)/r.eventCapacity; page++ {
+		// Every previous failure is eligible again. A restart in disk order
+		// would keep readmitting the first queue capacity indefinitely.
+		now = now.Add(r.eventCooldown + time.Second)
+		r.enqueuePersistedDirtyContext(t.Context(), false)
+		if pending := r.eventQueueStatus().Pending; pending != min(r.eventCapacity, total-len(seen)) {
+			t.Fatalf("page %d admitted %d records, after %d processed", page, pending, len(seen))
+		}
+		for {
+			work, ok := r.nextDirtyEvent()
+			if !ok {
+				break
+			}
+			if seen[work.entryName] {
+				t.Fatalf("record %q was readmitted before the scan reached the tail", work.entryName)
+			}
+			seen[work.entryName] = true
+			r.finishDirtyEvent(work, repairEventIncomplete)
+		}
+	}
+	if len(seen) != total {
+		t.Fatalf("scan reached only %d of %d unresolved entries", len(seen), total)
+	}
+	now = now.Add(r.eventCooldown + time.Second)
+	r.enqueuePersistedDirtyContext(t.Context(), false)
+	if pending := r.eventQueueStatus().Pending; pending != r.eventCapacity {
+		t.Fatalf("exhausted scan did not begin another recovery pass: pending=%d", pending)
+	}
+}
+
+func TestRepairEventDurableRescanIsNotANewFailure(t *testing.T) {
+	store, err := storage.NewStorage(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if err := store.MarkEntryDirtyChecked("alpha", config.ProtocolTorrent, "fixture"); err != nil {
+		t.Fatal(err)
+	}
+	r := NewRepair(&Manager{storage: store})
+	r.eventStarted = true
+	r.enqueuePersistedDirty()
+	work, ok := r.nextDirtyEvent()
+	if !ok {
+		t.Fatal("missing original work")
+	}
+	r.enqueuePersistedDirty() // the same persisted dirty revision is in flight
+	if outcome := r.finishDirtyEvent(work, repairEventHealthy); outcome != repairEventHealthy {
+		t.Fatalf("rescan invalidated an unchanged probe: %s", outcome)
+	}
+}
+
+func TestRepairEventPeriodicRescanLeavesOrdinaryDirtyEntriesForSweep(t *testing.T) {
+	store, err := storage.NewStorage(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if err := store.MarkEntryDirtyChecked("ordinary-change", config.ProtocolTorrent, "entry_item_changed"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.MarkEntryDirtyChecked("interrupted-check", config.ProtocolTorrent, "health_recheck_incomplete"); err != nil {
+		t.Fatal(err)
+	}
+	r := NewRepair(&Manager{storage: store})
+	r.eventStarted = true
+	r.enqueuePersistedDirtyContext(t.Context(), false)
+	work, ok := r.nextDirtyEvent()
+	if !ok || work.entryName != "interrupted-check" || r.eventQueueStatus().Pending != 0 {
+		t.Fatalf("periodic rescan admitted unrelated library changes: %+v, %v", work, ok)
+	}
+}
+
+func TestRepairEventWaitingForSweepGateIsCancelable(t *testing.T) {
+	r := NewRepair(&Manager{})
+	r.eventProbeMu.Lock()
+	defer r.eventProbeMu.Unlock()
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan repairEventOutcome, 1)
+	go func() { done <- r.processDirtyEvent(ctx, "alpha") }()
+	cancel()
+	select {
+	case outcome := <-done:
+		if outcome != repairEventIncomplete {
+			t.Fatalf("unexpected canceled outcome: %s", outcome)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("event worker could not stop while a sweep held the probe gate")
 	}
 }
 

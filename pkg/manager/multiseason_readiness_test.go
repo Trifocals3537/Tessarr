@@ -99,7 +99,9 @@ func prepareMultiSeasonSymlinkMount(t *testing.T, m *Manager, parent *storage.En
 	var target string
 	for _, file := range parent.Files {
 		target = filepath.Join(mount, file.Name)
-		if err := os.WriteFile(target, make([]byte, int(file.Size)), 0o600); err != nil {
+		data := make([]byte, int(file.Size))
+		data[0] = 0x1a
+		if err := os.WriteFile(target, data, 0o600); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -147,8 +149,8 @@ func TestMultiSeasonReadinessFanout(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if !child.IsComplete || child.LastError != "" {
-			t.Errorf("season %d incomplete: state=%s error=%s", season, child.State, child.LastError)
+		if !child.IsComplete || child.LastError != "" || child.Status != debridTypes.TorrentStatusDownloaded {
+			t.Errorf("season %d incomplete: state=%s status=%s error=%s", season, child.State, child.Status, child.LastError)
 		}
 		if child.SeasonSource == nil || child.SeasonSource.InfoHash != parent.InfoHash || child.SeasonSource.Season != season {
 			t.Fatalf("season %d lost durable source reference: %+v", season, child.SeasonSource)
@@ -168,8 +170,76 @@ func TestMultiSeasonReadinessFanout(t *testing.T) {
 		}
 	}
 	current, err := m.queue.GetTorrent(parent.InfoHash)
-	if err != nil || !current.IsComplete || current.State != storage.EntryStatePausedUP {
+	if err != nil || !current.IsSeasonFanoutParent() || current.ContentPath != "" {
 		t.Fatalf("successful parent outcome: %+v, %v", current, err)
+	}
+	if _, err := m.GetEntry(parent.InfoHash); err != nil {
+		t.Fatalf("fanout lost its mounted source: %v", err)
+	}
+}
+
+// Exercise the complete downloader/queue outcome on platforms where creating
+// managed symlinks is unavailable. The STRM action uses the same fanout and
+// durable completion boundary, with regular files instead of symlinks.
+func TestMultiSeasonStrmFanoutPublishesOnlyAfterSuccess(t *testing.T) {
+	for _, failOneSeason := range []bool{false, true} {
+		t.Run(fmt.Sprintf("failure_%t", failOneSeason), func(t *testing.T) {
+			m, parent := newMultiSeasonReadinessManager(t)
+			parent.Action = config.DownloadActionStrm
+			m.downloader.strmURL = "http://127.0.0.1:1234"
+			_, seasons := m.downloader.detectMultiSeason(parent)
+			children := convertToMultiSeason(parent, seasons)
+			if len(children) != 2 {
+				t.Fatal("fixture did not produce two seasons")
+			}
+			if failOneSeason {
+				root := children[0].DownloadPath()
+				if err := os.MkdirAll(root, 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(root, "unowned.txt"), []byte("foreign"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			err := m.downloader.download(t.Context(), parent)
+			if (err != nil) != failOneSeason {
+				t.Fatalf("fanout error = %v, want failure=%v", err, failOneSeason)
+			}
+			current, err := m.queue.GetTorrent(parent.InfoHash)
+			if err != nil || current.IsSeasonFanoutParent() == failOneSeason || current.IsComplete == failOneSeason {
+				t.Fatalf("parent advertised the wrong outcome: %+v, %v", current, err)
+			}
+			if !failOneSeason && current.ContentPath != "" {
+				t.Fatalf("completed fanout claimed imaginary path %q", current.ContentPath)
+			}
+			source, err := m.GetEntry(parent.InfoHash)
+			if err != nil {
+				t.Fatalf("fanout lost the authoritative source: %v", err)
+			}
+			for i, child := range children {
+				persisted, err := m.queue.GetTorrent(child.InfoHash)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if i == 0 && failOneSeason {
+					if persisted.IsComplete {
+						t.Fatal("failed child reported complete")
+					}
+					continue
+				}
+				if !persisted.IsComplete || persisted.Status != debridTypes.TorrentStatusDownloaded {
+					t.Fatalf("valid child did not complete: %+v", persisted)
+				}
+				for _, file := range persisted.Files {
+					output := filepath.Join(persisted.DownloadPath(), file.Path+".strm")
+					data, err := os.ReadFile(output)
+					want, urlErr := torrentSTRMURL(m.downloader.strmURL, source, file)
+					if err != nil || urlErr != nil || string(data) != want {
+						t.Fatalf("season output lost its authoritative source URL: %q, %v, %v", data, err, urlErr)
+					}
+				}
+			}
+		})
 	}
 }
 

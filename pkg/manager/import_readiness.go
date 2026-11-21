@@ -18,9 +18,12 @@ import (
 )
 
 const (
-	importReadinessWorkers   = 2
-	importReadinessProbeSize = 256 * 1024
+	importReadinessWorkers    = 2
+	importReadinessProbeSize  = 256 * 1024
+	importReadinessHeaderSize = 64
 )
+
+var errImportReadinessZeroContent = errors.New("zero-filled media data")
 
 type importReadinessFile struct {
 	path         string
@@ -234,13 +237,46 @@ func verifyImportReadinessFile(ctx context.Context, opener CacheWarmOpener, file
 	if actualSize != file.expectedSize {
 		return fmt.Errorf("logical size %d does not match expected size %d", actualSize, file.expectedSize)
 	}
+	sawData := false
 	for _, offset := range importReadinessOffsets(actualSize, importReadinessProbeSize) {
 		length := min(int64(importReadinessProbeSize), actualSize-offset)
-		if err := readExactReadinessRange(ctx, handle, offset, length); err != nil {
+		data, err := readExactReadinessRange(ctx, handle, offset, length)
+		if err != nil {
 			return fmt.Errorf("range %d-%d: %w", offset, offset+length-1, err)
 		}
+		// A sparse hole can satisfy a size/length check with no real data.
+		// For formats with an on-disk container header, a zero-filled prefix
+		// cannot be valid even when the remaining ranges contain real bytes.
+		if offset == 0 && expectsMediaHeader(file.logicalName) &&
+			!hasNonzeroReadinessBytes(data[:min(len(data), importReadinessHeaderSize)]) {
+			return fmt.Errorf("%w in media header", errImportReadinessZeroContent)
+		}
+		sawData = sawData || hasNonzeroReadinessBytes(data)
+	}
+	// Valid media may include padding or sparse zero-filled ranges. Only
+	// reject a generic file when *all* complete sampled ranges were zero.
+	if !sawData {
+		return fmt.Errorf("%w in all sampled ranges", errImportReadinessZeroContent)
 	}
 	return nil
+}
+
+func expectsMediaHeader(name string) bool {
+	switch strings.ToLower(filepath.Ext(name)) {
+	case ".mkv", ".mk3d", ".webm", ".avi", ".mp4", ".m4v", ".mov", ".3gp", ".wmv", ".asf", ".flv":
+		return true
+	default:
+		return false
+	}
+}
+
+func hasNonzeroReadinessBytes(data []byte) bool {
+	for _, value := range data {
+		if value != 0 {
+			return true
+		}
+	}
+	return false
 }
 
 func importReadinessOffsets(size int64, probeSize int) []int64 {
@@ -261,35 +297,35 @@ func importReadinessOffsets(size int64, probeSize int) []int64 {
 	return offsets
 }
 
-func readExactReadinessRange(ctx context.Context, reader CacheWarmFile, offset, length int64) error {
+func readExactReadinessRange(ctx context.Context, reader CacheWarmFile, offset, length int64) ([]byte, error) {
 	if length <= 0 {
-		return nil
+		return nil, nil
 	}
 	buffer := make([]byte, int(length))
 	read := 0
 	for read < len(buffer) {
 		if err := ctx.Err(); err != nil {
-			return err
+			return nil, err
 		}
 		n, err := reader.ReadAtContext(ctx, buffer[read:], offset+int64(read))
 		if n < 0 || n > len(buffer)-read {
-			return fmt.Errorf("invalid read count %d", n)
+			return nil, fmt.Errorf("invalid read count %d", n)
 		}
 		read += n
 		if err != nil {
 			if errors.Is(err, io.EOF) && read == len(buffer) {
-				return nil
+				return buffer, nil
 			}
 			if errors.Is(err, io.EOF) {
-				return io.ErrUnexpectedEOF
+				return nil, io.ErrUnexpectedEOF
 			}
-			return err
+			return nil, err
 		}
 		if n == 0 {
-			return io.ErrNoProgress
+			return nil, io.ErrNoProgress
 		}
 	}
-	return nil
+	return buffer, nil
 }
 
 func importReadinessTargetFingerprint(entry *storage.Entry) ([sha256.Size]byte, error) {

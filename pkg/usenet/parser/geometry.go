@@ -25,8 +25,8 @@ func (p *NZBParser) analyzeFileGeometry(ctx context.Context, group *FileGroup) e
 	}
 	mapper := iter.Mapper[nzbparser.NzbFile, result]{MaxGoroutines: max(1, p.maxConcurrent)}
 	results := mapper.Map(group.Files, func(file *nzbparser.NzbFile) result {
-		if !sortAndValidateSegments(file.Segments) {
-			return result{err: fmt.Errorf("invalid NZB segment numbering")}
+		if err := sortAndValidateSegments(file.Segments); err != nil {
+			return result{err: err}
 		}
 		fetch := func(id string) (*nntp.YencMetadata, error) {
 			var meta *nntp.YencMetadata
@@ -81,24 +81,32 @@ func (p *NZBParser) analyzeFileGeometry(ctx context.Context, group *FileGroup) e
 	return nil
 }
 
-func sortAndValidateSegments(segments nzbparser.NzbSegments) bool {
+// Keep the layout validation strict, but report the failing condition without
+// disclosing article message IDs (which may identify provider content).
+func sortAndValidateSegments(segments nzbparser.NzbSegments) error {
 	if len(segments) == 0 {
-		return false
+		return fmt.Errorf("invalid NZB segment numbering: no segments")
 	}
 	sort.Slice(segments, func(i, j int) bool { return segments[i].Number < segments[j].Number })
 	base := segments[0].Number
 	if base != 0 && base != 1 {
-		return false
+		return fmt.Errorf("invalid NZB segment numbering: first segment is %d, expected 0 or 1", base)
 	}
 	ids := make(map[string]struct{}, len(segments))
 	for i, s := range segments {
-		if s.Number != base+i || s.Id == "" {
-			return false
+		if i > 0 && s.Number == segments[i-1].Number {
+			return fmt.Errorf("invalid NZB segment numbering: duplicate segment number %d", s.Number)
+		}
+		if s.Number != base+i {
+			return fmt.Errorf("invalid NZB segment numbering: expected segment %d, found %d", base+i, s.Number)
+		}
+		if s.Id == "" {
+			return fmt.Errorf("invalid NZB segment numbering: empty message ID for segment %d", s.Number)
 		}
 		if _, exists := ids[s.Id]; exists {
-			return false
+			return fmt.Errorf("invalid NZB segment numbering: duplicate message ID for segment %d", s.Number)
 		}
 		ids[s.Id] = struct{}{}
 	}
-	return true
+	return nil
 }

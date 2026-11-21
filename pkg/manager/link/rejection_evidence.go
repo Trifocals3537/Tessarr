@@ -1,8 +1,11 @@
 package link
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"time"
 
+	"github.com/Trifocals3537/tessarr/pkg/debrid/types"
 	"github.com/Trifocals3537/tessarr/pkg/storage"
 )
 
@@ -18,7 +21,22 @@ type replacementRejectionState struct {
 	lastObserved time.Time
 }
 
-func replacementRejectionKey(entry *storage.Entry, filename string) string {
+// replacementValidationError carries the identity of the actual newly
+// validated URL. An account may change while a rejected link is refreshed,
+// so the identity of the old URL cannot establish replacement evidence.
+type replacementValidationError struct {
+	cause error
+	key   string
+}
+
+func (e *replacementValidationError) Error() string { return e.cause.Error() }
+func (e *replacementValidationError) Unwrap() error { return e.cause }
+
+func replacementRejectionKey(entry *storage.Entry, filename string, link types.DownloadLink) string {
+	if link.Debrid == "" || link.Token == "" {
+		// Unknown account identity cannot establish repeated observations.
+		return ""
+	}
 	key := linkLifecycleKey(entry, filename)
 	if file := entry.Files[filename]; file != nil {
 		key += "\x00" + file.ID
@@ -28,7 +46,9 @@ func replacementRejectionKey(entry *storage.Entry, filename string) string {
 			key += "\x00" + file.Id + "\x00" + file.Path
 		}
 	}
-	return key
+	// Keep credentials out of the evidence map and diagnostic messages.
+	account := sha256.Sum256([]byte(link.Token))
+	return key + "\x00" + link.Debrid + "\x00" + hex.EncodeToString(account[:])
 }
 
 func definitiveReplacementRejection(code string) bool {
@@ -45,6 +65,9 @@ func definitiveReplacementRejection(code string) bool {
 // concurrent burst. Link expiry, auth, throttling, and transport errors are
 // not evidence of persistently unavailable content.
 func (s *Service) noteReplacementRejection(key, code string) bool {
+	if key == "" {
+		return false
+	}
 	s.refreshMu.Lock()
 	defer s.refreshMu.Unlock()
 	if !definitiveReplacementRejection(code) {
@@ -80,6 +103,9 @@ func (s *Service) noteReplacementRejection(key, code string) bool {
 }
 
 func (s *Service) clearReplacementRejections(key string) {
+	if key == "" {
+		return
+	}
 	s.refreshMu.Lock()
 	defer s.refreshMu.Unlock()
 	delete(s.replacementRejections, key)

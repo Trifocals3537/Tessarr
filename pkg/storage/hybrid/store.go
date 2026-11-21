@@ -604,6 +604,62 @@ func (s *Store) ForEach(fn func(key string, value []byte) error) error {
 	return nil
 }
 
+// ScanCursor retains a stable key snapshot across bounded scan pages. The
+// zero value starts a new pass; once exhausted the next page starts another
+// pass. It belongs to one scanner and is not safe for concurrent use.
+type ScanCursor struct {
+	remaining []string
+}
+
+// ScanPage visits at most limit snapshot keys and stops before the next disk
+// read if more returns false. Values are read from their current offsets, not
+// cached, just like ForEach. Deletions still consume the key budget, and new
+// keys (including changes to disk order) cannot restart an unfinished pass.
+// The returned boolean reports whether unvisited snapshot keys remain.
+func (s *Store) ScanPage(cursor *ScanCursor, limit int, more func() bool, fn func(string, []byte) error) (bool, error) {
+	if s.closed.Load() {
+		return false, ErrStoreClosed
+	}
+	if limit <= 0 || (more != nil && !more()) {
+		return len(cursor.remaining) > 0, nil
+	}
+	if len(cursor.remaining) == 0 {
+		s.mu.RLock()
+		cursor.remaining = s.index.KeysSortedByOffset()
+		s.mu.RUnlock()
+	}
+
+	var scratch []byte
+	for visited := 0; visited < limit && len(cursor.remaining) > 0; visited++ {
+		if more != nil && !more() {
+			break
+		}
+		key := cursor.remaining[0]
+		cursor.remaining[0] = ""
+		cursor.remaining = cursor.remaining[1:]
+		if len(cursor.remaining) == 0 {
+			cursor.remaining = nil
+		}
+		s.mu.RLock()
+		entry := s.index.Get(key)
+		if entry == nil {
+			s.mu.RUnlock()
+			continue
+		}
+		value, err := s.log.ReadAtInto(entry.Offset, entry.Size, scratch)
+		s.mu.RUnlock()
+		if err != nil {
+			return len(cursor.remaining) > 0, fmt.Errorf("failed to read from log: %w", err)
+		}
+		scratch = value
+		s.stats.Reads.Add(1)
+		if err := fn(key, value); err != nil {
+			return len(cursor.remaining) > 0, err
+		}
+	}
+	return len(cursor.remaining) > 0, nil
+}
+
 // ForEachGuarded is equivalent to ForEach, but acquires a caller-provided
 // per-key guard before reading each current value. The guard is released after
 // the value has been read and before fn is called. This lets higher layers bind

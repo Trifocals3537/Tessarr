@@ -71,6 +71,8 @@ const (
 	repairEventProbeTimeout      = 2 * time.Minute
 	repairEventCooldown          = 2 * time.Minute
 	repairEventRescanInterval    = time.Minute
+	repairEventScanBudget        = 512
+	repairEventScanPageInterval  = time.Second
 	repairEventHistoryCapacity   = 4096
 )
 
@@ -112,6 +114,8 @@ type Repair struct {
 	eventCapacity       int
 	eventCooldown       time.Duration
 	eventRescanInterval time.Duration
+	eventScanMu         sync.Mutex
+	eventScan           storage.EntryHealthScan
 	eventProbeTimeout   time.Duration
 	eventNow            func() time.Time
 	eventProcess        func(context.Context, string) repairEventOutcome

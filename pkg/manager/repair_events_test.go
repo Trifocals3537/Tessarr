@@ -2,6 +2,7 @@ package manager
 
 import (
 	"context"
+	"fmt"
 	"slices"
 	"sync/atomic"
 	"testing"
@@ -252,6 +253,59 @@ func TestRepairEventRescanRevisitsDroppedAndIncompleteRecords(t *testing.T) {
 		case <-deadline.C:
 			t.Fatalf("dirty records stranded without a new read signal: %v", got)
 		}
+	}
+}
+
+func TestRepairEventRescanProgressesPastPermanentlyUnresolvedPrefix(t *testing.T) {
+	store, err := storage.NewStorage(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	r := NewRepair(&Manager{storage: store})
+	r.eventCapacity = 3
+	r.eventStarted = true
+	now := time.Now()
+	r.eventNow = func() time.Time { return now }
+
+	// More than six queue capacities of permanently unresolved dirty rows.
+	// Nothing rewrites the prefix or moves it to the end of the health log.
+	const total = 20
+	for i := range total {
+		name := fmt.Sprintf("entry-%03d", i)
+		if err := store.MarkEntryDirtyChecked(name, config.ProtocolTorrent, "read_failure:timeout"); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	seen := make(map[string]bool)
+	for page := 0; page < (total+r.eventCapacity-1)/r.eventCapacity; page++ {
+		// Every previous failure is eligible again. A restart in disk order
+		// would keep readmitting the first queue capacity indefinitely.
+		now = now.Add(r.eventCooldown + time.Second)
+		r.enqueuePersistedDirtyContext(t.Context(), false)
+		if pending := r.eventQueueStatus().Pending; pending != min(r.eventCapacity, total-len(seen)) {
+			t.Fatalf("page %d admitted %d records, after %d processed", page, pending, len(seen))
+		}
+		for {
+			work, ok := r.nextDirtyEvent()
+			if !ok {
+				break
+			}
+			if seen[work.entryName] {
+				t.Fatalf("record %q was readmitted before the scan reached the tail", work.entryName)
+			}
+			seen[work.entryName] = true
+			r.finishDirtyEvent(work, repairEventIncomplete)
+		}
+	}
+	if len(seen) != total {
+		t.Fatalf("scan reached only %d of %d unresolved entries", len(seen), total)
+	}
+	now = now.Add(r.eventCooldown + time.Second)
+	r.enqueuePersistedDirtyContext(t.Context(), false)
+	if pending := r.eventQueueStatus().Pending; pending != r.eventCapacity {
+		t.Fatalf("exhausted scan did not begin another recovery pass: pending=%d", pending)
 	}
 }
 

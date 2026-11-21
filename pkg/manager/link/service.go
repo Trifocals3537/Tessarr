@@ -229,9 +229,10 @@ func (s *Service) fetchAndValidate(ctx context.Context, entry *storage.Entry, fi
 
 	// Only successful validations are memoized. Transient failures must be
 	// allowed to recover on the next request.
+	evidenceKey := replacementRejectionKey(entry, filename, link)
 	if _, exists := s.validated.Load(validationKey(link)); exists && s.accountValidationIsCurrent(link) {
 		s.clearRefreshBackoff(lifecyclePolicyKey(ctx, linkLifecycleKey(entry, filename)))
-		s.clearReplacementRejections(replacementRejectionKey(entry, filename))
+		s.clearReplacementRejections(evidenceKey)
 		return link, nil
 	}
 	s.validated.Delete(validationKey(link))
@@ -240,7 +241,12 @@ func (s *Service) fetchAndValidate(ctx context.Context, entry *storage.Entry, fi
 
 	if validationErr != nil {
 		// Handle link error categories
-		if linkErr := GetLinkError(validationErr); linkErr != nil {
+		linkErr := GetLinkError(validationErr)
+		if !errors.Is(validationErr, context.Canceled) && !errors.Is(validationErr, context.DeadlineExceeded) &&
+			(linkErr == nil || !linkErr.ShouldRefetch() || !definitiveReplacementRejection(linkErr.Code)) {
+			s.clearReplacementRejections(evidenceKey)
+		}
+		if linkErr != nil {
 			if linkErr.ShouldSuspendAccount() {
 				hasAlternate, status, err := s.suspendLinkAccount(link, linkErr)
 				if err != nil {
@@ -270,7 +276,7 @@ func (s *Service) fetchAndValidate(ctx context.Context, entry *storage.Entry, fi
 					// Preserve the refetchable error. The outer refresh governor records
 					// the failed replacement and suppresses another provider regeneration
 					// until its bounded cooldown expires.
-					return emptyDownloadLink, validationErr
+					return emptyDownloadLink, &replacementValidationError{cause: validationErr, key: evidenceKey}
 				}
 				return s.refreshRejectedLink(ctx, entry, filename, link, repairAttempt, linkRefreshes)
 			}
@@ -281,7 +287,7 @@ func (s *Service) fetchAndValidate(ctx context.Context, entry *storage.Entry, fi
 	}
 
 	s.completeRecoveryProbe(link)
-	s.clearReplacementRejections(replacementRejectionKey(entry, filename))
+	s.clearReplacementRejections(evidenceKey)
 	if !s.accountValidationIsCurrent(link) {
 		// Another request suspended or permanently disabled the account while
 		// this validation was in flight. The successful URL may serve this
@@ -325,7 +331,8 @@ func (s *Service) refreshRejectedLink(ctx context.Context, entry *storage.Entry,
 			if linkErr := GetLinkError(err); linkErr != nil && linkErr.ShouldRefetch() &&
 				!errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
 				delay, failures := s.recordRefreshFailure(key)
-				confirmed := s.noteReplacementRejection(replacementRejectionKey(entry, filename), linkErr.Code)
+				var observation *replacementValidationError
+				confirmed := errors.As(err, &observation) && s.noteReplacementRejection(observation.key, linkErr.Code)
 				s.logger.Warn().
 					Str("debrid", entry.ActiveProvider).
 					Str("infohash", entry.InfoHash).
@@ -343,8 +350,6 @@ func (s *Service) refreshRejectedLink(ctx context.Context, entry *storage.Entry,
 					// refresh/failover eligibility and the bounded cooldown.
 					return emptyDownloadLink, NewRefetchableError(ErrRepeatedLinkRejection, CodeRepeatedLinkRejection)
 				}
-			} else if !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
-				s.clearReplacementRejections(replacementRejectionKey(entry, filename))
 			}
 			return emptyDownloadLink, err
 		}

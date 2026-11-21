@@ -3,6 +3,7 @@ package link
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"sync/atomic"
@@ -92,10 +93,81 @@ func TestReplacementRejectionEvidenceIsScopedAndNotTransient(t *testing.T) {
 
 func TestReplacementRejectionUsesCurrentFileIdentity(t *testing.T) {
 	entry := lifecycleTestEntry()
+	link := lifecycleDownloadLink("https://cdn.example/video")
 	entry.Files["video.mkv"].ID = "original-file"
-	before := replacementRejectionKey(entry, "video.mkv")
+	before := replacementRejectionKey(entry, "video.mkv", link)
 	entry.Files["video.mkv"].ID = "replacement-file"
-	if after := replacementRejectionKey(entry, "video.mkv"); after == before {
+	if after := replacementRejectionKey(entry, "video.mkv", link); after == before {
 		t.Fatal("rejection evidence survived replacement of the canonical file")
+	}
+}
+
+func TestReplacementRejectionUsesActualReplacementAccount(t *testing.T) {
+	type attempt struct {
+		account   string
+		healthy   bool
+		confirmed bool
+	}
+	for _, tc := range []struct {
+		name     string
+		attempts []attempt
+	}{
+		{
+			name: "switch requires independent confirmation",
+			attempts: []attempt{
+				{account: "account-a"}, {account: "account-a"},
+				{account: "account-b"}, {account: "account-b"},
+				{account: "account-b", confirmed: true},
+			},
+		},
+		{
+			name: "success on another account does not clear evidence",
+			attempts: []attempt{
+				{account: "account-a"}, {account: "account-b"},
+				{account: "account-a"}, {account: "account-b", healthy: true},
+				{account: "account-b"}, {account: "account-a", confirmed: true},
+				{account: "account-b"},
+			},
+		},
+		{
+			name: "missing account cannot confirm",
+			attempts: []attempt{
+				{}, {}, {}, {},
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+				if req.URL.Query().Get("healthy") == "true" {
+					writeValidLinkProbe(w)
+					return
+				}
+				w.Header().Set("X-Error", "invalid_download_code")
+				w.WriteHeader(http.StatusForbidden)
+			}))
+			defer server.Close()
+
+			client := &lifecycleTestClient{cacheLinks: true}
+			for i, attempt := range tc.attempts {
+				l := lifecycleDownloadLink(fmt.Sprintf("%s/%d?healthy=%t", server.URL, i, attempt.healthy))
+				l.Token = attempt.account
+				client.links = append(client.links, l)
+			}
+			service := newLifecycleService(client, server.Client(), 0)
+			now := time.Now()
+			service.now = func() time.Time { return now }
+			entry := lifecycleTestEntry()
+			rejected := lifecycleDownloadLink("https://cdn.example/stale")
+			rejected.Token = "previous-account"
+
+			for i, attempt := range tc.attempts {
+				_, err := service.Refresh(t.Context(), entry, "video.mkv", rejected)
+				if attempt.healthy != (err == nil) || attempt.confirmed != errors.Is(err, ErrRepeatedLinkRejection) {
+					t.Fatalf("replacement %d (healthy=%t, confirmed=%t): %v", i, attempt.healthy, attempt.confirmed, err)
+				}
+				now = now.Add(refreshBackoffMax)
+				// The previous URL may still belong to a different account.
+			}
+		})
 	}
 }

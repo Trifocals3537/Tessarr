@@ -120,9 +120,19 @@ func (r *Repair) startEventWorker(ctx context.Context) error {
 	r.eventMu.Unlock()
 
 	r.runReserved(func() {
+		// Even the initial key-snapshot work must not block the sole
+		// probe worker from processing already admitted failures.
+		scanDone := make(chan struct{})
+		go func() {
+			defer close(scanDone)
+			r.eventScanLoop(eventCtx)
+		}()
+		defer func() {
+			cancel()
+			<-scanDone
+		}()
 		r.eventLoop(eventCtx)
 	})
-	r.enqueuePersistedDirtyContext(eventCtx, true)
 	return nil
 }
 
@@ -168,15 +178,17 @@ func (r *Repair) eventQueueHasRoom() bool {
 	return r.eventStarted && len(r.eventQueue) < capacity
 }
 
-func (r *Repair) enqueuePersistedDirtyContext(ctx context.Context, startup bool) {
+func (r *Repair) enqueuePersistedDirtyContext(ctx context.Context, startup bool) bool {
 	if r == nil || r.manager == nil || r.manager.storage == nil {
-		return
+		return false
 	}
-	if !r.eventQueueHasRoom() {
-		return
-	}
+	r.eventScanMu.Lock()
+	defer r.eventScanMu.Unlock()
 	skipNZB := r.cfg().SkipNZBRepair
-	if err := r.manager.storage.ForEachEntryHealth(func(health *storage.EntryHealth) error {
+	more := func() bool {
+		return ctx.Err() == nil && r.eventQueueHasRoom()
+	}
+	pending, err := r.manager.storage.ScanEntryHealthPage(&r.eventScan, repairEventScanBudget, more, func(health *storage.EntryHealth) error {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
@@ -185,8 +197,42 @@ func (r *Repair) enqueuePersistedDirtyContext(ctx context.Context, startup bool)
 			r.enqueueDirtyEntry(health.EntryName, false)
 		}
 		return nil
-	}); err != nil && ctx.Err() == nil {
+	})
+	if err != nil && ctx.Err() == nil {
 		r.logger.Warn().Err(err).Msg("Unable to rescan durable dirty health records")
+	}
+	return pending
+}
+
+func (r *Repair) eventScanLoop(ctx context.Context) {
+	defer func() {
+		r.eventScanMu.Lock()
+		r.eventScan = storage.EntryHealthScan{}
+		r.eventScanMu.Unlock()
+	}()
+	interval := r.eventRescanInterval
+	if interval <= 0 {
+		interval = repairEventRescanInterval
+	}
+	startup := true
+	for {
+		// Resume durable recovery after bounded-queue refusals, cooldowns,
+		// and incomplete checks even without another player read. Pace
+		// unfinished scans separately so large libraries do not need a
+		// minute per page, but wait a normal interval between full passes.
+		pending := r.enqueuePersistedDirtyContext(ctx, startup)
+		startup = startup && pending && r.eventQueueHasRoom()
+		delay := interval
+		if pending {
+			delay = min(delay, repairEventScanPageInterval)
+		}
+		timer := time.NewTimer(delay)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return
+		case <-timer.C:
+		}
 	}
 }
 
@@ -201,21 +247,9 @@ func (r *Repair) eventLoop(ctx context.Context) {
 		clear(r.eventGeneration)
 		r.eventMu.Unlock()
 	}()
-	interval := r.eventRescanInterval
-	if interval <= 0 {
-		interval = repairEventRescanInterval
-	}
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
 	for {
-		// Recover bounded-queue refusals, cooldowns, and incomplete checks
-		// even if no player ever reads the file again.
-		select {
-		case <-ctx.Done():
+		if ctx.Err() != nil {
 			return
-		case <-ticker.C:
-			r.enqueuePersistedDirtyContext(ctx, false)
-		default:
 		}
 
 		work, ok := r.nextDirtyEvent()
@@ -224,8 +258,6 @@ func (r *Repair) eventLoop(ctx context.Context) {
 			case <-ctx.Done():
 				return
 			case <-r.eventSignal:
-			case <-ticker.C:
-				r.enqueuePersistedDirtyContext(ctx, false)
 			}
 			continue
 		}

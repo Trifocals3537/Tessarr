@@ -109,9 +109,12 @@ func (q *QBit) handleTorrentsInfo(w http.ResponseWriter, r *http.Request) {
 
 	// Convert hashes to filter function
 	torrents := q.manager.Queue().ListFilter(category, config.ProtocolTorrent, storage.TorrentState(state), hashes, "added_on", false)
-	qbitTorrents := make([]Torrent, len(torrents))
-	for i, t := range torrents {
-		qbitTorrents[i] = convertToQBitTorrentTorrent(t)
+	qbitTorrents := make([]Torrent, 0, len(torrents))
+	for _, t := range torrents {
+		if t.IsSeasonFanoutParent() {
+			continue // the season children, not their source, are importable
+		}
+		qbitTorrents = append(qbitTorrents, convertToQBitTorrentTorrent(t))
 	}
 	utils.JSONResponse(w, qbitTorrents, http.StatusOK)
 }
@@ -514,7 +517,7 @@ func (q *QBit) handleCreateCategory(w http.ResponseWriter, r *http.Request) {
 func (q *QBit) handleTorrentProperties(w http.ResponseWriter, r *http.Request) {
 	hash := r.URL.Query().Get("hash")
 	torrent, err := q.manager.Queue().GetTorrent(hash)
-	if err != nil {
+	if err != nil || torrent.IsSeasonFanoutParent() {
 		http.Error(w, "Entry not found", http.StatusNotFound)
 		return
 	}
@@ -526,7 +529,7 @@ func (q *QBit) handleTorrentProperties(w http.ResponseWriter, r *http.Request) {
 func (q *QBit) handleTorrentFiles(w http.ResponseWriter, r *http.Request) {
 	hash := r.URL.Query().Get("hash")
 	torrent, err := q.manager.Queue().GetTorrent(hash)
-	if err != nil {
+	if err != nil || torrent.IsSeasonFanoutParent() {
 		http.Error(w, "Entry not found", http.StatusNotFound)
 		return
 	}

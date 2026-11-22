@@ -18,9 +18,10 @@ const (
 )
 
 type QueueOutcome struct {
-	Kind        QueueOutcomeKind
-	Err         error
-	ContentPath string
+	Kind                 QueueOutcomeKind
+	Err                  error
+	ContentPath          string
+	SeasonFanoutComplete bool
 }
 
 // CommitQueuedOutcome is a single-row durable transition boundary. It checks
@@ -38,6 +39,9 @@ func (s *Storage) CommitQueuedOutcome(expected *Entry, outcome QueueOutcome) (*E
 	}
 	if outcome.Kind == QueueOutcomeFailed && outcome.Err == nil {
 		return nil, fmt.Errorf("failed queue outcome requires an error")
+	}
+	if outcome.SeasonFanoutComplete && (outcome.Kind != QueueOutcomeCompleted || outcome.ContentPath != "") {
+		return nil, fmt.Errorf("season fanout completion cannot claim an import path")
 	}
 	ref, err := s.acquireMainEntryState(expected.InfoHash)
 	if err != nil {
@@ -63,7 +67,12 @@ func (s *Storage) CommitQueuedOutcome(expected *Entry, outcome QueueOutcome) (*E
 		current.Status = debridTypes.TorrentStatusQueued
 		current.IsDownloading = false
 	case QueueOutcomeCompleted:
+		if outcome.SeasonFanoutComplete && (!current.IsTorrent() || current.FileScopeRestricted ||
+			current.SeasonSource != nil || current.SkipMultiSeason) {
+			return nil, fmt.Errorf("invalid season fanout parent")
+		}
 		current.MarkAsCompleted(outcome.ContentPath)
+		current.SeasonFanoutComplete = outcome.SeasonFanoutComplete
 	}
 	if err := s.writeQueueRecord(current, s.queue.PutExistingSynced); err != nil {
 		return nil, err

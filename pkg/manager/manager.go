@@ -585,6 +585,11 @@ func (m *Manager) initializeActiveDownloads(adopt func() error) {
 		m.jobQueue = nil
 		return
 	}
+	if err := m.recoverCompletedSeasonFanouts(m.ctx); err != nil {
+		m.initializationErr = fmt.Errorf("recover completed season fanouts: %w", err)
+		m.jobQueue = nil
+		return
+	}
 	m.initJobQueue()
 }
 

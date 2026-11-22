@@ -1759,6 +1759,14 @@ func (sc *SegmentCache) evictBatch(indices []int) {
 		if !sc.states[idx].CompareAndSwap(uint32(StateOnDisk), uint32(StateEvicting)) {
 			continue
 		}
+		// A reader can pin the segment between the optimistic pin check and
+		// the CAS. Recheck after reserving it. Readers pin before checking
+		// the state, so those arriving after this point see Evicting and wait.
+		if sc.pinCounts[idx].Load() > 0 {
+			sc.states[idx].Store(uint32(StateOnDisk))
+			sc.wakeWaiters(idx)
+			continue
+		}
 		size := sc.segLengths[idx].Load()
 		if size <= 0 {
 			size = sc.segments[idx].Bytes

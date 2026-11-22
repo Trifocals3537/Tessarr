@@ -119,6 +119,8 @@ message EntryProto {
   // a normal entry or a legacy season child lacking a validated source.
   string season_source_info_hash = 51;
   int32 season_source_number = 52;
+  // A completed queue-only fanout parent has no independent import path.
+  bool season_fanout_complete = 53;
 }
 
 // ============================================================================

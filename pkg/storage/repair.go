@@ -423,18 +423,35 @@ func (s *Storage) getEntryHealthLocked(entryName string) (*EntryHealth, error) {
 
 func (s *Storage) ForEachEntryHealth(fn func(*EntryHealth) error) error {
 	return s.repairState.ForEach(func(key string, value []byte) error {
-		var state EntryHealth
-		if err := json.Unmarshal(value, &state); err != nil {
-			return nil
-		}
-		if state.EntryName == "" {
-			state.EntryName = key
-		}
-		if state.CanonicalEntry != "" || state.Cleared || state.Archived {
-			return nil
-		}
-		return fn(&state)
+		return visitEntryHealth(key, value, fn)
 	})
+}
+
+// EntryHealthScan resumes an in-progress health-store pass between admission
+// attempts, even when the preceding page filled the event queue.
+type EntryHealthScan struct {
+	cursor hybrid.ScanCursor
+}
+
+// ScanEntryHealthPage returns whether the current pass has more keys to visit.
+func (s *Storage) ScanEntryHealthPage(scan *EntryHealthScan, limit int, more func() bool, fn func(*EntryHealth) error) (bool, error) {
+	return s.repairState.ScanPage(&scan.cursor, limit, more, func(key string, value []byte) error {
+		return visitEntryHealth(key, value, fn)
+	})
+}
+
+func visitEntryHealth(key string, value []byte, fn func(*EntryHealth) error) error {
+	var state EntryHealth
+	if err := json.Unmarshal(value, &state); err != nil {
+		return nil
+	}
+	if state.EntryName == "" {
+		state.EntryName = key
+	}
+	if state.CanonicalEntry != "" || state.Cleared || state.Archived {
+		return nil
+	}
+	return fn(&state)
 }
 
 func (s *Storage) DeleteEntryHealth(entryName string) error {
@@ -575,6 +592,11 @@ func (s *Storage) markEntryDirtyLocked(entryName string, protocol config.Protoco
 	state.ProbeProgress = nil
 	if failed != nil {
 		addFailedRead(state, *failed)
+		// Preserve last verified timestamps, but a new failed range makes
+		// the current health unknown until that evidence is reconciled.
+		if state.Status == HealthHealthy {
+			state.Status = HealthUnknown
+		}
 	}
 	if failed == nil && missingLegacyReadEvidence(state) {
 		state.FailedReadsIncomplete = true

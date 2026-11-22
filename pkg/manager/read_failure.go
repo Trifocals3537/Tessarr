@@ -10,6 +10,7 @@ import (
 
 	"github.com/Trifocals3537/tessarr/internal/customerror"
 	"github.com/Trifocals3537/tessarr/internal/nntp"
+	"github.com/Trifocals3537/tessarr/pkg/manager/link"
 	"github.com/Trifocals3537/tessarr/pkg/storage"
 )
 
@@ -32,6 +33,15 @@ func classifyTerminalReadFailure(err error) (class string, retryable bool) {
 		return "provider_auth", false
 	case errors.Is(err, io.ErrUnexpectedEOF):
 		return "unexpected_eof", true
+	}
+	if isDeferredReadFailure(err) {
+		return "local_cooldown", true
+	}
+	if isRepeatedLinkRejection(err) {
+		return link.CodeRepeatedLinkRejection, true
+	}
+	if allReadFailureCauses(err, explicitUnavailableLink) {
+		return "content_missing", false
 	}
 
 	var customErr *customerror.Error
@@ -60,6 +70,58 @@ func classifyTerminalReadFailure(err error) (class string, retryable bool) {
 		return "transient", true
 	}
 	return "other", false
+}
+
+// A failover error can contain multiple provider attempts. An observation is
+// conclusive (or merely deferred) only when every underlying cause agrees.
+// Inspect joined errors before unwrapping ordinary context wrappers.
+func allReadFailureCauses(err error, matches func(error) bool) bool {
+	if err == nil {
+		return false
+	}
+	if joined, ok := err.(interface{ Unwrap() []error }); ok {
+		causes := joined.Unwrap()
+		if len(causes) == 0 {
+			return false
+		}
+		for _, cause := range causes {
+			if !allReadFailureCauses(cause, matches) {
+				return false
+			}
+		}
+		return true
+	}
+	if matches(err) {
+		return true
+	}
+	return allReadFailureCauses(errors.Unwrap(err), matches)
+}
+
+func isDeferredReadFailure(err error) bool {
+	return allReadFailureCauses(err, func(cause error) bool {
+		switch e := cause.(type) {
+		case streamFileCircuitOpenError, *streamFileCircuitOpenError:
+			return true
+		case *link.Error:
+			return e != nil && e.Code == link.CodeLinkRefreshCooldown
+		default:
+			return false
+		}
+	})
+}
+
+func isRepeatedLinkRejection(err error) bool {
+	return allReadFailureCauses(err, func(cause error) bool {
+		return cause == link.ErrRepeatedLinkRejection
+	})
+}
+
+func explicitUnavailableLink(cause error) bool {
+	if cause == link.ErrFileNotAvailable {
+		return true
+	}
+	e, ok := cause.(*link.Error)
+	return ok && e != nil && e.IsPermanent() && e.Code == "file_not_available"
 }
 
 func (m *Manager) allowReadFailureLog(key string, now time.Time) bool {
@@ -98,8 +160,13 @@ func (m *Manager) RecordTerminalReadFailure(entry *storage.Entry, filename strin
 	shouldLog := m.allowReadFailureLog(key, time.Now())
 
 	persisted := false
+	queued := false
+	observed := !isDeferredReadFailure(err)
 	healthName := entry.Name
-	if m.storage != nil && entry.Name != "" {
+	// A local cooldown has not attempted the range upstream. Recording it as
+	// a new failure would continuously invalidate in-progress health proof
+	// while the player retries a file whose real failure is already durable.
+	if observed && m.storage != nil && entry.Name != "" {
 		fileID := ""
 		if file := entry.Files[filename]; file != nil {
 			fileID = file.ID
@@ -112,7 +179,7 @@ func (m *Manager) RecordTerminalReadFailure(entry *storage.Entry, filename strin
 		persisted = persistErr == nil && healthName != ""
 	}
 	if persisted && m.repair != nil {
-		m.repair.QueueDirtyEntry(healthName)
+		queued = m.repair.QueueDirtyEntry(healthName)
 	}
 	if !shouldLog {
 		return
@@ -134,6 +201,8 @@ func (m *Manager) RecordTerminalReadFailure(entry *storage.Entry, filename strin
 		Int64("length", length).
 		Str("failure_class", class).
 		Bool("retryable", retryable).
+		Bool("upstream_failure_observed", observed).
 		Bool("health_dirty_persisted", persisted).
+		Bool("health_recheck_queued", queued).
 		Msg("Terminal media read failure")
 }

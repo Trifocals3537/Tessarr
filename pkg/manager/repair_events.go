@@ -42,6 +42,10 @@ type repairEventWork struct {
 // caller persists the dirty record first, so refusing admission never loses
 // the repair signal.
 func (r *Repair) QueueDirtyEntry(entryName string) bool {
+	return r.enqueueDirtyEntry(entryName, true)
+}
+
+func (r *Repair) enqueueDirtyEntry(entryName string, freshSignal bool) bool {
 	if r == nil {
 		return false
 	}
@@ -56,8 +60,12 @@ func (r *Repair) QueueDirtyEntry(entryName string) bool {
 		return false
 	}
 	if _, exists := r.eventQueued[entryName]; exists {
-		r.eventGeneration[entryName]++
-		r.eventCoalesced.Add(1)
+		// A periodic durable scan is not a new failed read. It must not
+		// invalidate a probe already checking the same dirty revision.
+		if freshSignal {
+			r.eventGeneration[entryName]++
+			r.eventCoalesced.Add(1)
+		}
 		return false
 	}
 	now := time.Now()
@@ -65,7 +73,9 @@ func (r *Repair) QueueDirtyEntry(entryName string) bool {
 		now = r.eventNow()
 	}
 	if last, exists := r.eventLast[entryName]; exists && r.eventCooldown > 0 && now.Sub(last) < r.eventCooldown {
-		r.eventCoalesced.Add(1)
+		if freshSignal {
+			r.eventCoalesced.Add(1)
+		}
 		return false
 	}
 	capacity := r.eventCapacity
@@ -73,7 +83,9 @@ func (r *Repair) QueueDirtyEntry(entryName string) bool {
 		capacity = repairEventQueueCapacity
 	}
 	if len(r.eventQueue) >= capacity {
-		r.eventDropped.Add(1)
+		if freshSignal {
+			r.eventDropped.Add(1)
+		}
 		return false
 	}
 
@@ -108,9 +120,19 @@ func (r *Repair) startEventWorker(ctx context.Context) error {
 	r.eventMu.Unlock()
 
 	r.runReserved(func() {
+		// Even the initial key-snapshot work must not block the sole
+		// probe worker from processing already admitted failures.
+		scanDone := make(chan struct{})
+		go func() {
+			defer close(scanDone)
+			r.eventScanLoop(eventCtx)
+		}()
+		defer func() {
+			cancel()
+			<-scanDone
+		}()
 		r.eventLoop(eventCtx)
 	})
-	r.enqueuePersistedDirty()
 	return nil
 }
 
@@ -133,15 +155,85 @@ func (r *Repair) stopEventWorker() {
 }
 
 func (r *Repair) enqueuePersistedDirty() {
-	if r == nil || r.manager == nil || r.manager.storage == nil {
-		return
+	r.enqueuePersistedDirtyContext(context.Background(), true)
+}
+
+// Periodic recovery is for read-failure evidence and interrupted checks, not
+// every ordinary library mutation. Other dirty entries remain eligible for the
+// configured sweep; startup retains its existing bounded dirty admission.
+func repairEventRetryCandidate(health *storage.EntryHealth) bool {
+	return len(health.FailedReads) > 0 || health.FailedReadsIncomplete || health.ProbeProgress != nil ||
+		strings.HasPrefix(health.DirtyReason, "read_failure") ||
+		strings.HasPrefix(health.DirtyReason, "health_recheck_") ||
+		strings.HasPrefix(health.DirtyReason, "event_recheck_")
+}
+
+func (r *Repair) eventQueueHasRoom() bool {
+	r.eventMu.Lock()
+	defer r.eventMu.Unlock()
+	capacity := r.eventCapacity
+	if capacity <= 0 {
+		capacity = repairEventQueueCapacity
 	}
-	_ = r.manager.storage.ForEachEntryHealth(func(health *storage.EntryHealth) error {
-		if health != nil && health.Dirty {
-			r.QueueDirtyEntry(health.EntryName)
+	return r.eventStarted && len(r.eventQueue) < capacity
+}
+
+func (r *Repair) enqueuePersistedDirtyContext(ctx context.Context, startup bool) bool {
+	if r == nil || r.manager == nil || r.manager.storage == nil {
+		return false
+	}
+	r.eventScanMu.Lock()
+	defer r.eventScanMu.Unlock()
+	skipNZB := r.cfg().SkipNZBRepair
+	more := func() bool {
+		return ctx.Err() == nil && r.eventQueueHasRoom()
+	}
+	pending, err := r.manager.storage.ScanEntryHealthPage(&r.eventScan, repairEventScanBudget, more, func(health *storage.EntryHealth) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if health != nil && health.Dirty && !(skipNZB && health.Protocol == config.ProtocolNZB) &&
+			(startup || repairEventRetryCandidate(health)) {
+			r.enqueueDirtyEntry(health.EntryName, false)
 		}
 		return nil
 	})
+	if err != nil && ctx.Err() == nil {
+		r.logger.Warn().Err(err).Msg("Unable to rescan durable dirty health records")
+	}
+	return pending
+}
+
+func (r *Repair) eventScanLoop(ctx context.Context) {
+	defer func() {
+		r.eventScanMu.Lock()
+		r.eventScan = storage.EntryHealthScan{}
+		r.eventScanMu.Unlock()
+	}()
+	interval := r.eventRescanInterval
+	if interval <= 0 {
+		interval = repairEventRescanInterval
+	}
+	startup := true
+	for {
+		// Resume durable recovery after bounded-queue refusals, cooldowns,
+		// and incomplete checks even without another player read. Pace
+		// unfinished scans separately so large libraries do not need a
+		// minute per page, but wait a normal interval between full passes.
+		pending := r.enqueuePersistedDirtyContext(ctx, startup)
+		startup = startup && pending && r.eventQueueHasRoom()
+		delay := interval
+		if pending {
+			delay = min(delay, repairEventScanPageInterval)
+		}
+		timer := time.NewTimer(delay)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return
+		case <-timer.C:
+		}
+	}
 }
 
 func (r *Repair) eventLoop(ctx context.Context) {
@@ -156,35 +248,33 @@ func (r *Repair) eventLoop(ctx context.Context) {
 		r.eventMu.Unlock()
 	}()
 	for {
-		select {
-		case <-ctx.Done():
+		if ctx.Err() != nil {
 			return
-		case <-r.eventSignal:
 		}
 
-		for {
-			work, ok := r.nextDirtyEvent()
-			if !ok {
-				break
-			}
-			startedAt := time.Now()
-			outcome := r.processDirtyEvent(ctx, work.entryName)
-			outcome = r.finishDirtyEvent(work, outcome)
-			status := r.eventQueueStatus()
-			logEvent := r.logger.Debug()
-			if outcome != repairEventHealthy {
-				logEvent = r.logger.Warn()
-			}
-			logEvent.
-				Str("entry", work.entryName).
-				Str("outcome", string(outcome)).
-				Dur("latency", time.Since(startedAt)).
-				Int("pending", status.Pending).
-				Msg("Event-driven health recheck completed")
-			if ctx.Err() != nil {
+		work, ok := r.nextDirtyEvent()
+		if !ok {
+			select {
+			case <-ctx.Done():
 				return
+			case <-r.eventSignal:
 			}
+			continue
 		}
+		startedAt := time.Now()
+		outcome := r.processDirtyEvent(ctx, work.entryName)
+		outcome = r.finishDirtyEvent(work, outcome)
+		status := r.eventQueueStatus()
+		logEvent := r.logger.Debug()
+		if outcome != repairEventHealthy {
+			logEvent = r.logger.Warn()
+		}
+		logEvent.
+			Str("entry", work.entryName).
+			Str("outcome", string(outcome)).
+			Dur("latency", time.Since(startedAt)).
+			Int("pending", status.Pending).
+			Msg("Event-driven health recheck completed")
 	}
 }
 
@@ -202,8 +292,6 @@ func (r *Repair) nextDirtyEvent() (repairEventWork, bool) {
 }
 
 func (r *Repair) processDirtyEvent(ctx context.Context, entryName string) repairEventOutcome {
-	r.eventProbeMu.Lock()
-	defer r.eventProbeMu.Unlock()
 	if ctx.Err() != nil {
 		return repairEventIncomplete
 	}
@@ -214,10 +302,37 @@ func (r *Repair) processDirtyEvent(ctx context.Context, entryName string) repair
 	}
 	probeCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
+	// A scheduled sweep owns the same probe gate. Waiting indefinitely for
+	// that gate would ignore shutdown and delay every following dirty event.
+	if !r.lockEventProbe(probeCtx) {
+		return repairEventIncomplete
+	}
+	defer r.eventProbeMu.Unlock()
+	if probeCtx.Err() != nil {
+		return repairEventIncomplete
+	}
 	if r.eventProcess != nil {
 		return r.eventProcess(probeCtx, entryName)
 	}
 	return r.reconcileDirtyEntry(probeCtx, entryName)
+}
+
+func (r *Repair) lockEventProbe(ctx context.Context) bool {
+	if r.eventProbeMu.TryLock() {
+		return true
+	}
+	ticker := time.NewTicker(50 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return false
+		case <-ticker.C:
+			if r.eventProbeMu.TryLock() {
+				return true
+			}
+		}
+	}
 }
 
 func (r *Repair) reconcileDirtyEntry(ctx context.Context, entryName string) repairEventOutcome {
@@ -225,6 +340,14 @@ func (r *Repair) reconcileDirtyEntry(ctx context.Context, entryName string) repa
 		return repairEventIncomplete
 	}
 	previous, _ := r.manager.storage.GetEntryHealth(entryName)
+	if previous != nil && !previous.Dirty {
+		switch previous.Status {
+		case storage.HealthHealthy, storage.HealthUnsupported:
+			return repairEventHealthy
+		case storage.HealthBroken:
+			return repairEventBroken
+		}
+	}
 	dirtyReason := "event_recheck_incomplete"
 	var protocol config.Protocol
 	if previous != nil {

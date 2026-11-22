@@ -2,7 +2,20 @@
 
 Notable user-facing Tessarr changes are documented here.
 
-## 2.7.0 - Unreleased
+## 2.7.1 - Unreleased
+
+- Keep completed multi-season source entries out of the qBittorrent import
+  listing, preserve their mounted source, and reconcile older phantom rows
+  when their season-child identity and missing output can be established.
+- Reject zero-filled media samples during import-readiness checks and fence
+  cache reads and refills against physical disk reclamation.
+- Distinguish confirmed repeated replacement-link rejection from retries
+  deferred by a local cooldown. Prioritize failed ranges in health probes
+  and retry durable dirty records that could not finish or enter the queue.
+- Report the particular NZB segment validation failure without exposing
+  article IDs or weakening segment geometry validation.
+
+## 2.7.0
 
 ### Usenet and playback
 

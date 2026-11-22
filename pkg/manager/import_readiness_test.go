@@ -19,8 +19,10 @@ import (
 )
 
 type readinessTestFile struct {
-	size      int64
-	shortRead bool
+	size        int64
+	shortRead   bool
+	zeroAll     bool
+	zeroOffsets map[int64]bool
 
 	mu      sync.Mutex
 	offsets []int64
@@ -71,6 +73,9 @@ func (f *concurrentReadinessFile) ReadAtContext(ctx context.Context, p []byte, _
 	if f.shortRead && len(p) > 1 {
 		return len(p) - 1, io.EOF
 	}
+	if len(p) > 0 {
+		p[0] = 1
+	}
 	return len(p), nil
 }
 
@@ -83,6 +88,9 @@ func (f *readinessTestFile) ReadAtContext(_ context.Context, p []byte, off int64
 	f.mu.Unlock()
 	if f.shortRead && len(p) > 1 {
 		return len(p) - 1, io.EOF
+	}
+	if len(p) > 0 && !f.zeroAll && !f.zeroOffsets[off] {
+		p[0] = 1
 	}
 	return len(p), nil
 }
@@ -200,6 +208,43 @@ func TestVerifyImportReadinessRejectsTruncatedRange(t *testing.T) {
 	}})
 	if !errors.Is(err, io.ErrUnexpectedEOF) {
 		t.Fatalf("verify error = %v, want unexpected EOF", err)
+	}
+}
+
+func TestVerifyImportReadinessRejectsZeroFilledMedia(t *testing.T) {
+	const size = int64(1024 * 1024)
+	for _, tc := range []struct {
+		name       string
+		filename   string
+		zeroAll    bool
+		zeroHeader bool
+	}{
+		{"all samples zero", "movie.ts", true, false},
+		{"zero header with nonzero later samples", "movie.MKV", false, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			manager, file := readinessTestManager(t, size)
+			file.zeroAll = tc.zeroAll
+			file.zeroOffsets = map[int64]bool{0: tc.zeroHeader}
+			probe := importReadinessFile{path: tc.filename, logicalName: tc.filename, expectedSize: size}
+			err := manager.verifyImportReadiness(t.Context(), &storage.Entry{InfoHash: "readiness-hash"}, []importReadinessFile{probe})
+			if !errors.Is(err, errImportReadinessZeroContent) {
+				t.Fatalf("zero-filled media accepted: %v", err)
+			}
+		})
+	}
+}
+
+func TestVerifyImportReadinessAllowsZeroPadding(t *testing.T) {
+	const size = int64(1024 * 1024)
+	manager, file := readinessTestManager(t, size)
+	file.zeroOffsets = make(map[int64]bool)
+	for _, offset := range importReadinessOffsets(size, importReadinessProbeSize)[1:] {
+		file.zeroOffsets[offset] = true
+	}
+	probe := importReadinessFile{path: "movie.mkv", logicalName: "movie.mkv", expectedSize: size}
+	if err := manager.verifyImportReadiness(t.Context(), &storage.Entry{InfoHash: "readiness-hash"}, []importReadinessFile{probe}); err != nil {
+		t.Fatalf("valid header with zero data in other ranges was rejected: %v", err)
 	}
 }
 

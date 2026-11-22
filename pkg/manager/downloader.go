@@ -174,11 +174,14 @@ func (d *Downloader) download(ctx context.Context, torrent *storage.Entry) error
 		if len(failures) > 0 {
 			return fmt.Errorf("multi-season import failed: %w", errors.Join(failures...))
 		}
-		// Parent has been fanned out into season entries; mark it complete so
-		// it leaves the downloading queue instead of getting re-processed.
-		if err := d.completeEntry(torrent); err != nil {
+		// The parent is an internal source/tracker, not a second import. Keep
+		// its completed queue row for lifecycle purposes but publish a durable
+		// fanout outcome with no imaginary output directory.
+		if err := d.markAsCompleted(torrent, true); err != nil {
 			return err
 		}
+		d.notifyCompleted(torrent)
+		d.triggerArrRefresh(torrent)
 		if torrent.Action == config.DownloadActionNone {
 			return errDeleteQueueEntryOnJobFinish
 		}
@@ -222,7 +225,7 @@ func (d *Downloader) process(ctx context.Context, entry *storage.Entry, mountPat
 }
 
 func (d *Downloader) completeEntry(entry *storage.Entry) error {
-	if err := d.markAsCompleted(entry); err != nil {
+	if err := d.markAsCompleted(entry, false); err != nil {
 		return err
 	}
 	d.notifyCompleted(entry)
@@ -230,9 +233,13 @@ func (d *Downloader) completeEntry(entry *storage.Entry) error {
 	return nil
 }
 
-func (d *Downloader) markAsCompleted(entry *storage.Entry) error {
+func (d *Downloader) markAsCompleted(entry *storage.Entry, fanout bool) error {
+	contentPath := entry.DownloadPath()
+	if fanout {
+		contentPath = ""
+	}
 	err := d.manager.queue.commitOutcome(entry, storage.QueueOutcome{
-		Kind: storage.QueueOutcomeCompleted, ContentPath: entry.DownloadPath(),
+		Kind: storage.QueueOutcomeCompleted, ContentPath: contentPath, SeasonFanoutComplete: fanout,
 	})
 	if err != nil {
 		d.manager.recordWorkflowFault(err)
@@ -244,6 +251,9 @@ func (d *Downloader) markAsCompleted(entry *storage.Entry) error {
 func (d *Downloader) notifyCompleted(entry *storage.Entry) {
 	// Send notification
 	msg := fmt.Sprintf("Download completed: %s [%s] -> %s", entry.Name, entry.Category, entry.DownloadPath())
+	if entry.IsSeasonFanoutParent() {
+		msg = fmt.Sprintf("Multi-season split completed: %s [%s]", entry.Name, entry.Category)
+	}
 	d.manager.Notifications.Notify(notifications.Event{
 		Type:    config.EventDownloadComplete,
 		Status:  "success",

@@ -98,6 +98,48 @@ func TestFailoverArticleOutcomes(t *testing.T) {
 	}
 }
 
+func TestFailoverArticleUnavailableReasons(t *testing.T) {
+	absent := classifyNNTPError(423, "no article")
+	geometry := &Error{Type: ErrorTypeArticleNotFound, ArticleReason: ArticleInvalidGeometry}
+	incomplete := &Error{Type: ErrorTypeArticleNotFound, ArticleReason: ArticleIncompleteBody}
+	unknown := &Error{Type: ErrorTypeArticleNotFound, ArticleReason: ArticleUnavailableReason("raw-provider-detail")}
+	temporary := NewTimeoutError(errors.New("timeout"))
+	for _, tt := range []struct {
+		name          string
+		first, second error
+		want          ArticleUnavailableReason
+	}{
+		{"all absent", absent, absent, ArticleAbsent},
+		{"all same invalid", geometry, geometry, ArticleInvalidGeometry},
+		{"all invalid, varying reasons", geometry, incomplete, ArticleInvalidData},
+		{"absent and invalid", absent, geometry, ArticleMixedUnavailable},
+		{"invalid and absent", geometry, absent, ArticleMixedUnavailable},
+		{"unknown reason redacted", unknown, unknown, ArticleUnknownReason},
+		{"absence with unclassified", absent, unknown, ArticleMixedUnavailable},
+		{"temporary with invalid", temporary, geometry, ""},
+		{"available fallback", geometry, nil, ""},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			client := newFailoverTestClient(t, 0, config.UsenetProvider{Host: "provider-a"}, config.UsenetProvider{Host: "provider-b", Backup: true})
+			err := client.ExecuteWithFailover(t.Context(), func(conn *Connection) error {
+				if conn.address == "provider-a" {
+					return tt.first
+				}
+				return tt.second
+			})
+			if reason := ArticleUnavailableReasonOf(err); reason != tt.want {
+				t.Fatalf("reason = %q, want %q; error=%v", reason, tt.want, err)
+			}
+			if tt.want != "" && (!IsArticleNotFoundError(err) || !errors.Is(err, tt.second)) {
+				t.Fatalf("summary lost failover/causal error: %v", err)
+			}
+			if tt.second == nil && err != nil {
+				t.Fatalf("available article did not succeed: %v", err)
+			}
+		})
+	}
+}
+
 func TestFailoverRetryBudget(t *testing.T) {
 	for _, failure := range []error{
 		NewConnectionError(errors.New("disconnected")), NewTimeoutError(errors.New("timeout")),

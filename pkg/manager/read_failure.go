@@ -20,6 +20,10 @@ const (
 )
 
 func classifyTerminalReadFailure(err error) (class string, retryable bool) {
+	if isDeferredReadFailure(err) {
+		return "local_cooldown", true
+	}
+	err = withoutDeferredArticleFailures(err)
 	switch {
 	case err == nil:
 		return "none", false
@@ -27,15 +31,14 @@ func classifyTerminalReadFailure(err error) (class string, retryable bool) {
 		return "canceled", false
 	case errors.Is(err, context.DeadlineExceeded):
 		return "timeout", true
+	case errors.Is(err, storage.ErrInvalidNZBMap):
+		return "invalid_nzb_map", false
 	case nntp.IsArticleNotFoundError(err):
-		return "content_missing", false
+		return articleReadFailureClass(nntp.ArticleUnavailableReasonOf(err)), false
 	case nntp.IsAuthenticationError(err):
 		return "provider_auth", false
 	case errors.Is(err, io.ErrUnexpectedEOF):
 		return "unexpected_eof", true
-	}
-	if isDeferredReadFailure(err) {
-		return "local_cooldown", true
 	}
 	if isRepeatedLinkRejection(err) {
 		return link.CodeRepeatedLinkRejection, true
@@ -72,6 +75,43 @@ func classifyTerminalReadFailure(err error) (class string, retryable bool) {
 	return "other", false
 }
 
+func articleReadFailureClass(reason nntp.ArticleUnavailableReason) string {
+	switch {
+	case reason == nntp.ArticleAbsent:
+		return "content_missing"
+	case reason.InvalidData():
+		return "invalid_article_data"
+	default:
+		return "article_unavailable"
+	}
+}
+
+func readArticleFailureReason(err error) string {
+	return string(nntp.ArticleUnavailableReasonOf(withoutDeferredArticleFailures(err)))
+}
+
+// A joined failure may include both a cached Usenet result and a newly
+// observed result. The latter determines diagnostic class and reason.
+func withoutDeferredArticleFailures(err error) error {
+	var deferred *customerror.DeferredArticleFailure
+	if !errors.As(err, &deferred) {
+		return err
+	}
+	if isDeferredReadFailure(err) {
+		return nil
+	}
+	if joined, ok := err.(interface{ Unwrap() []error }); ok {
+		var fresh []error
+		for _, cause := range joined.Unwrap() {
+			if remaining := withoutDeferredArticleFailures(cause); remaining != nil {
+				fresh = append(fresh, remaining)
+			}
+		}
+		return errors.Join(fresh...)
+	}
+	return withoutDeferredArticleFailures(errors.Unwrap(err))
+}
+
 // A failover error can contain multiple provider attempts. An observation is
 // conclusive (or merely deferred) only when every underlying cause agrees.
 // Inspect joined errors before unwrapping ordinary context wrappers.
@@ -100,7 +140,7 @@ func allReadFailureCauses(err error, matches func(error) bool) bool {
 func isDeferredReadFailure(err error) bool {
 	return allReadFailureCauses(err, func(cause error) bool {
 		switch e := cause.(type) {
-		case streamFileCircuitOpenError, *streamFileCircuitOpenError:
+		case streamFileCircuitOpenError, *streamFileCircuitOpenError, *customerror.DeferredArticleFailure:
 			return true
 		case *link.Error:
 			return e != nil && e.Code == link.CodeLinkRefreshCooldown
@@ -162,6 +202,7 @@ func (m *Manager) RecordTerminalReadFailure(entry *storage.Entry, filename strin
 	persisted := false
 	queued := false
 	observed := !isDeferredReadFailure(err)
+	upstreamObserved := observed && class != "invalid_nzb_map"
 	healthName := entry.Name
 	// A local cooldown has not attempted the range upstream. Recording it as
 	// a new failure would continuously invalidate in-progress health proof
@@ -200,8 +241,9 @@ func (m *Manager) RecordTerminalReadFailure(entry *storage.Entry, filename strin
 		Int64("offset", offset).
 		Int64("length", length).
 		Str("failure_class", class).
+		Str("article_failure_reason", readArticleFailureReason(err)).
 		Bool("retryable", retryable).
-		Bool("upstream_failure_observed", observed).
+		Bool("upstream_failure_observed", upstreamObserved).
 		Bool("health_dirty_persisted", persisted).
 		Bool("health_recheck_queued", queued).
 		Msg("Terminal media read failure")

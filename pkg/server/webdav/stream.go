@@ -187,6 +187,7 @@ func (h *Handler) logStreamFailure(logKey string, err error, streamErr *customer
 		Str("stream_request_id", diagnostic.RequestID).
 		Str("path", logKey).
 		Str("failure_class", diagnostic.Class).
+		Str("article_failure_reason", diagnostic.ArticleReason).
 		Str("code", code).
 		Int("status", diagnostic.Status).
 		Bool("retryable", diagnostic.Retryable).

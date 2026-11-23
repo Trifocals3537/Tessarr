@@ -137,11 +137,11 @@ func (sf *SegmentFetcher) Fetch(ctx context.Context, segIdx int) error {
 	// Actually fetch
 	err := sf.doFetch(ctx, segIdx)
 	promise.err = err
-	close(promise.done)
 
 	// Cleanup
 	sf.inFlightMu.Lock()
 	delete(sf.inFlight, segIdx)
+	close(promise.done)
 	sf.inFlightMu.Unlock()
 
 	return err
@@ -253,7 +253,7 @@ func (sf *SegmentFetcher) doFetch(ctx context.Context, segIdx int) error {
 		// Legacy maps without provenance keep their existing slice checks.
 		if seg.Source != nil && (meta == nil || meta.PartSize != n || !seg.Source.Matches(meta.Size, meta.Begin, meta.End, meta.Part, meta.Total, n)) {
 			writer.Discard()
-			return &nntp.Error{Type: nntp.ErrorTypeArticleNotFound, Message: "article yEnc geometry does not match expected source"}
+			return &nntp.Error{Type: nntp.ErrorTypeArticleNotFound, ArticleReason: nntp.ArticleInvalidGeometry, Message: "article yEnc geometry does not match expected source"}
 		}
 
 		// Treat zero-byte articles as missing — the article exists on the
@@ -261,8 +261,9 @@ func (sf *SegmentFetcher) doFetch(ctx context.Context, segIdx int) error {
 		if n == 0 {
 			writer.Discard()
 			return &nntp.Error{
-				Type:    nntp.ErrorTypeArticleNotFound,
-				Message: "article produced no data after decoding",
+				Type:          nntp.ErrorTypeArticleNotFound,
+				ArticleReason: nntp.ArticleEmptyBody,
+				Message:       "article produced no data after decoding",
 			}
 		}
 
@@ -273,9 +274,10 @@ func (sf *SegmentFetcher) doFetch(ctx context.Context, segIdx int) error {
 		if err := writer.Finalize(); err != nil {
 			writer.Discard()
 			return &nntp.Error{
-				Type:    nntp.ErrorTypeArticleNotFound,
-				Message: "article returned incomplete decoded data",
-				Err:     err,
+				Type:          nntp.ErrorTypeArticleNotFound,
+				ArticleReason: nntp.ArticleIncompleteBody,
+				Message:       "article returned incomplete decoded data",
+				Err:           err,
 			}
 		}
 
@@ -287,6 +289,9 @@ func (sf *SegmentFetcher) doFetch(ctx context.Context, segIdx int) error {
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			sf.cache.ReleaseFetching(segIdx)
 			return err
+		}
+		if nntp.IsArticleNotFoundError(err) {
+			err = &articleFailureObservation{cause: err}
 		}
 		sf.cache.MarkFailed(segIdx, err)
 		return err
@@ -363,16 +368,55 @@ func (sf *SegmentFetcher) prefetchOne(segIdx int) {
 // background prefetch workers have already downloaded them, so this loop
 // usually just confirms cache presence. fetchWithRetry keeps a single
 // transient segment failure from tearing down the whole stream.
-func (sf *SegmentFetcher) EnsureSegments(ctx context.Context, startSeg, endSeg int) error {
+func (sf *SegmentFetcher) EnsureSegments(ctx context.Context, startSeg, endSeg int, offset int64) error {
 	for i := startSeg; i <= endSeg; i++ {
+		// A cooldown-admitted probe must see real bytes or a new failure,
+		// including the extra CBC ciphertext/IV segments used by encrypted
+		// reads. Normal reads do not reopen failed articles.
+		if isRecoveryProbe(ctx) {
+			if err := sf.resetFailedForRetry(ctx, i); err != nil {
+				return err
+			}
+		}
 		state := sf.cache.GetState(i)
 		if state != StateOnDisk {
 			if err := sf.fetchWithRetry(ctx, i); err != nil {
-				return err
+				return sf.segmentReadFailure(i, offset, err)
 			}
 		}
 	}
 	return nil
+}
+
+// resetFailedForRetry waits for the prior promise to retire before reopening
+// a failed slot. Otherwise a recovery read could join the already-completed
+// failing download even after the cache state has been reset.
+func (sf *SegmentFetcher) resetFailedForRetry(ctx context.Context, segIdx int) error {
+	for sf.cache.GetState(segIdx) == StateFailed {
+		sf.inFlightMu.Lock()
+		promise := sf.inFlight[segIdx]
+		if promise == nil {
+			sf.cache.ResetFailed(segIdx)
+			sf.inFlightMu.Unlock()
+			return nil
+		}
+		sf.inFlightMu.Unlock()
+		select {
+		case <-promise.done:
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-sf.ctx.Done():
+			return sf.ctx.Err()
+		}
+	}
+	return nil
+}
+
+func (sf *SegmentFetcher) segmentReadFailure(segIdx int, readOffset int64, err error) error {
+	if nntp.IsArticleNotFoundError(err) {
+		return &SegmentReadFailure{Offset: max(readOffset, sf.cache.SegmentOffset(segIdx)), cause: err}
+	}
+	return err
 }
 
 // fetchWithRetry fetches a single segment, retrying transient failures so a
@@ -390,7 +434,9 @@ func (sf *SegmentFetcher) fetchWithRetry(ctx context.Context, segIdx int) error 
 			// Clear the failed state so the segment can be re-fetched, then
 			// back off briefly before retrying. ResetFailed is a CAS: if a
 			// concurrent reader fetched the segment meanwhile it stays OnDisk.
-			sf.cache.ResetFailed(segIdx)
+			if err := sf.resetFailedForRetry(ctx, segIdx); err != nil {
+				return err
+			}
 			select {
 			case <-ctx.Done():
 				return ctx.Err()

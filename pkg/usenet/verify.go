@@ -245,7 +245,7 @@ func verificationError(filename string, head []byte, readErr error) error {
 	if errors.Is(readErr, context.Canceled) || errors.Is(readErr, context.DeadlineExceeded) {
 		return readErr
 	}
-	if nntp.IsArticleNotFoundError(readErr) {
+	if nntp.ArticleUnavailableReasonOf(readErr) == nntp.ArticleAbsent {
 		return fmt.Errorf("head article of %q is missing: %w", filename, customerror.UsenetSegmentMissingError)
 	}
 	if readErr != nil && !errors.Is(readErr, io.EOF) {

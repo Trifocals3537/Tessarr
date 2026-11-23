@@ -113,7 +113,7 @@ func verifyExactRange(ctx context.Context, reader contextRangeReader, size, offs
 		if n < 0 || int64(n) > want {
 			return errors.New("invalid byte range read count")
 		}
-		if nntp.IsArticleNotFoundError(err) {
+		if nntp.ArticleUnavailableReasonOf(err) == nntp.ArticleAbsent {
 			return customerror.UsenetSegmentMissingError
 		}
 		if err != nil && !errors.Is(err, io.EOF) {
@@ -139,9 +139,6 @@ func (u *Usenet) VerifyFileRanges(ctx context.Context, id, name string, ranges [
 	file, err := u.getFile(id, name)
 	if err != nil {
 		return err
-	}
-	if file == nil || file.Size <= 0 {
-		return errors.New("invalid current file size")
 	}
 	entry, err := u.createEntryWithReadLimits(file, 1, 0)
 	if err != nil {

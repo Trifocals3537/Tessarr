@@ -1363,7 +1363,8 @@ func (sc *SegmentCache) MarkFailed(segIdx int, err error) {
 	sc.wakeWaiters(segIdx)
 }
 
-// GetError returns the error for a failed segment.
+// GetError returns the last recorded failure. Consult StateFailed before use;
+// a retry never clears an error that a concurrent reader may still observe.
 func (sc *SegmentCache) GetError(segIdx int) error {
 	if segIdx < 0 || segIdx >= sc.segCount {
 		return nil
@@ -1384,9 +1385,10 @@ func (sc *SegmentCache) ResetFailed(segIdx int) {
 	if segIdx < 0 || segIdx >= sc.segCount {
 		return
 	}
-	if sc.states[segIdx].CompareAndSwap(uint32(StateFailed), uint32(StateEmpty)) {
-		sc.errors[segIdx].Store(nil)
-	}
+	// Retain the last error until another failure replaces it. A reader that
+	// already observed StateFailed must still see an error, and clearing it
+	// after the CAS could erase a concurrent fetcher's newly recorded failure.
+	sc.states[segIdx].CompareAndSwap(uint32(StateFailed), uint32(StateEmpty))
 }
 
 // ReleaseFetching transitions Fetching → Empty. Only the fetcher that owns the
@@ -1530,7 +1532,6 @@ func (sc *SegmentCache) invalidateForRefetch(segIdx int) {
 			sc.curDisk.Add(-size)
 		}
 	}
-	sc.errors[segIdx].Store(nil)
 }
 
 // wakeWaiters wakes any WaitForSegment callers parked on this segment's shard.

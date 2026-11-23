@@ -384,6 +384,7 @@ func (c *Client) ExecuteWithFailover(ctx context.Context, fn func(conn *Connecti
 	var lastErr error
 	var lastTransientErr error
 	var lastMissingErr error
+	var unavailableReason ArticleUnavailableReason
 	var exclusions providerExclusions
 	var missing providerExclusions
 
@@ -517,6 +518,7 @@ func (c *Client) ExecuteWithFailover(ctx context.Context, fn func(conn *Connecti
 				excludeForArticleNotFound(&exclusions, currentProvider)
 				excludeForArticleNotFound(&missing, currentProvider)
 				lastMissingErr = err
+				unavailableReason = mergeArticleUnavailableReasons(unavailableReason, ArticleUnavailableReasonOf(err))
 			case ErrorTypeConnection, ErrorTypeTimeout, ErrorTypeServerBusy:
 				exclusions.excludeHost(currentProvider.Host)
 			default:
@@ -543,6 +545,9 @@ func (c *Client) ExecuteWithFailover(ctx context.Context, fn func(conn *Connecti
 			}
 		}
 		if allMissing {
+			if unavailableReason != ArticleUnavailableReasonOf(lastMissingErr) {
+				return &articleUnavailableSummary{reason: unavailableReason, cause: lastMissingErr}
+			}
 			return lastMissingErr
 		}
 	}

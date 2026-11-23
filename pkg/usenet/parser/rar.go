@@ -220,7 +220,7 @@ func (p *RARParser) Process(ctx context.Context, group *FileGroup, password stri
 		}
 
 		size := rarFile.UncompressedSize
-		expectedSize, sizeErr := storedStreamSize(size, rarFile.IsEncrypted)
+		expectedSize, sizeErr := storage.NZBStoredStreamSize(size, rarFile.IsEncrypted)
 		if sizeErr != nil || size <= 0 || expectedSize != streamSize {
 			return nil, fmt.Errorf("incomplete RAR member %q: declared %d bytes, mapped %d", rarFile.Name, size, streamSize)
 		}

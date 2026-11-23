@@ -162,6 +162,10 @@ func (r *Repair) probeFilesWithEvidence(ctx context.Context, c *candidate, h *st
 							res.reason = "failed_range_unavailable"
 							if isRepeatedLinkRejection(err) {
 								res.reason = link.CodeRepeatedLinkRejection
+							} else if res.protocol == config.ProtocolNZB {
+								if reason := usenetContentFailureReason(err); reason != "" {
+									res.reason = reason
+								}
 							}
 						}
 					}
@@ -221,9 +225,14 @@ func (r *Repair) probeFilesWithEvidence(ctx context.Context, c *candidate, h *st
 type boundedProbeWriter struct{ remaining int64 }
 
 func isDefinitiveRangeFailure(err error) bool {
+	var deferredArticle *customerror.DeferredArticleFailure
+	if isDeferredReadFailure(err) || errors.As(err, &deferredArticle) {
+		return false
+	}
 	return allReadFailureCauses(err, func(cause error) bool {
 		if cause == link.ErrRepeatedLinkRejection || explicitUnavailableLink(cause) ||
-			cause == customerror.UsenetSegmentMissingError || cause == customerror.UsenetCorruptContentError {
+			cause == customerror.UsenetSegmentMissingError || cause == customerror.UsenetCorruptContentError ||
+			cause == storage.ErrInvalidNZBMap {
 			return true
 		}
 		switch e := cause.(type) {

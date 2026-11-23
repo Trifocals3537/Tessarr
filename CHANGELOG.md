@@ -2,7 +2,20 @@
 
 Notable user-facing Tessarr changes are documented here.
 
-## 2.7.1 - Unreleased
+## 2.7.2 - Unreleased
+
+- Reject incomplete or inconsistent stored NZB segment maps before streaming
+  or deep content checks. Preserve complete legacy maps with unspecified
+  offsets and correctly padded encrypted archive members.
+- Revalidate the actual failed article after a Usenet recovery cooldown,
+  refreshing failed cache entries without discarding healthy cached data or
+  scheduling unrelated downloads.
+- Distinguish provider-reported article absence, unusable decoded article data,
+  mixed provider outcomes, invalid local maps, and deferred recovery in
+  diagnostics. Cached cooldown responses no longer invalidate durable health
+  probe progress.
+
+## 2.7.1
 
 - Keep completed multi-season source entries out of the qBittorrent import
   listing, preserve their mounted source, and reconcile older phantom rows

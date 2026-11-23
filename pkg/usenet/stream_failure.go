@@ -8,6 +8,7 @@ import (
 
 	"github.com/Trifocals3537/tessarr/internal/customerror"
 	"github.com/Trifocals3537/tessarr/internal/nntp"
+	"github.com/Trifocals3537/tessarr/pkg/usenet/fs/reader"
 	"github.com/puzpuzpuz/xsync/v4"
 )
 
@@ -40,7 +41,7 @@ func (s *failedFileState) streamError() error {
 	s.mu.Lock()
 	cause := s.cause
 	s.mu.Unlock()
-	return customerror.NewArticleNotFoundError(cause)
+	return customerror.NewDeferredArticleNotFoundError(cause)
 }
 
 func (u *Usenet) failureClock() time.Time {
@@ -50,25 +51,39 @@ func (u *Usenet) failureClock() time.Time {
 	return time.Now()
 }
 
-func (u *Usenet) recordFailedFile(key string, failedOffset int64, cause error) {
+// recordFailedFile returns true if the current quarantine already represents
+// this exact fetch. Concurrent or cached readers must not renew its cooldown
+// or create another health-evidence observation.
+func (u *Usenet) recordFailedFile(key string, failedOffset int64, cause error) (deferred bool) {
 	if u == nil || u.failedFiles == nil || key == "" || cause == nil {
-		return
+		return false
 	}
 	if failedOffset < 0 {
 		failedOffset = 0
 	}
 	now := u.failureClock()
-	state, loaded := u.failedFiles.LoadOrStore(key, &failedFileState{})
-	state.mu.Lock()
-	if !loaded || state.failures < 1 {
-		state.failures = 1
-	}
-	state.cause = cause
-	state.failedOffset = failedOffset
-	state.revision++
-	state.retryAfter = now.Add(failedFileBackoff(state.failures))
-	state.probeInFlight = false
-	state.mu.Unlock()
+	u.failedFiles.Compute(key, func(state *failedFileState, loaded bool) (*failedFileState, xsync.ComputeOp) {
+		if !loaded {
+			state = &failedFileState{}
+		}
+		state.mu.Lock()
+		defer state.mu.Unlock()
+		if loaded && reader.SameArticleFailureObservation(state.cause, cause) {
+			deferred = true
+			return state, xsync.CancelOp
+		}
+		if state.failures < 1 {
+			state.failures = 1
+		}
+		state.cause = cause
+		state.failedOffset = failedOffset
+		state.revision++
+		state.retryAfter = now.Add(failedFileBackoff(state.failures))
+		// Keep a running probe fenced until it returns. Its result may
+		// not clear or replace this newer failure revision.
+		return state, xsync.UpdateOp
+	})
+	return deferred
 }
 
 func failedReadOffset(start, end, written int64) int64 {
@@ -99,7 +114,7 @@ func (u *Usenet) EnsureStreamReady(ctx context.Context, nzoID, filename string) 
 	now := u.failureClock()
 	state.mu.Lock()
 	if state.probeInFlight || now.Before(state.retryAfter) {
-		err := customerror.NewArticleNotFoundError(state.cause)
+		err := customerror.NewDeferredArticleNotFoundError(state.cause)
 		state.mu.Unlock()
 		return err
 	}
@@ -122,6 +137,9 @@ func (u *Usenet) EnsureStreamReady(ctx context.Context, nzoID, filename string) 
 			}
 			current.mu.Lock()
 			unchanged := current.revision == revision
+			if !unchanged {
+				current.probeInFlight = false
+			}
 			current.mu.Unlock()
 			if unchanged {
 				return current, xsync.DeleteOp
@@ -136,16 +154,24 @@ func (u *Usenet) EnsureStreamReady(ctx context.Context, nzoID, filename string) 
 
 	state.mu.Lock()
 	state.probeInFlight = false
-	if nntp.IsArticleNotFoundError(err) {
-		state.cause = err
-		state.failures++
-		state.revision++
-		state.retryAfter = u.failureClock().Add(failedFileBackoff(state.failures))
-	} else {
-		// Transient probe failures retain the known permanent cause. Retry later
-		// instead of reopening the file or escalating the permanent backoff tier.
-		state.retryAfter = u.failureClock().Add(failedFileInitialBackoff)
+	repeatedObservation := reader.SameArticleFailureObservation(state.cause, err)
+	// A concurrent active read may have recorded a newer failure. Never
+	// overwrite its cause, failed offset, or deadline with the stale verdict.
+	if state.revision == revision {
+		if nntp.IsArticleNotFoundError(err) && !repeatedObservation {
+			state.cause = err
+			state.failures++
+			state.revision++
+			state.retryAfter = u.failureClock().Add(failedFileBackoff(state.failures))
+		} else {
+			// Transient probe failures retain the known permanent cause. Retry later
+			// instead of reopening the file or escalating the permanent backoff tier.
+			state.retryAfter = u.failureClock().Add(failedFileInitialBackoff)
+		}
 	}
 	state.mu.Unlock()
+	if repeatedObservation {
+		return customerror.NewDeferredArticleNotFoundError(err)
+	}
 	return err
 }

@@ -96,12 +96,12 @@ func (h recoveryHost) Download(ctx context.Context, id string, expected *storage
 			}
 			var typed *nntp.Error
 			if errors.As(err, &typed) && typed.Type == nntp.ErrorTypeYencDecode {
-				return &nntp.Error{Type: nntp.ErrorTypeArticleNotFound, Message: "invalid article payload", Err: err}
+				return &nntp.Error{Type: nntp.ErrorTypeArticleNotFound, ArticleReason: nntp.ArticleInvalidPayload, Message: "invalid article payload", Err: err}
 			}
 			return err
 		}
 		if meta == nil || n <= 0 || n != int64(buffer.Len()) || meta.PartSize != n || meta.Size <= 0 || meta.Size > recovery.MaxReleaseBytes || meta.Begin < 1 || meta.End-meta.Begin+1 != n || meta.End > meta.Size || (expected != nil && !expected.Matches(meta.Size, meta.Begin, meta.End, meta.Part, meta.Total, n)) {
-			return &nntp.Error{Type: nntp.ErrorTypeArticleNotFound, Message: "article does not match its source geometry"}
+			return &nntp.Error{Type: nntp.ErrorTypeArticleNotFound, ArticleReason: nntp.ArticleInvalidGeometry, Message: "article does not match its source geometry"}
 		}
 		payload = buffer.Bytes()
 		metadata = meta

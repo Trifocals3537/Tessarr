@@ -35,8 +35,10 @@ func TestArticleFailureObservationClaimIsPerFetch(t *testing.T) {
 	if claimed != 1 {
 		t.Fatalf("shared fetch was claimed %d times, want one", claimed)
 	}
-	if !ClaimArticleFailureObservation(cause) || !ClaimArticleFailureObservation(cause) {
-		t.Fatal("untagged errors have no shared fetch identity")
+	for range 2 {
+		if !ClaimArticleFailureObservation(cause) {
+			t.Fatal("untagged errors have no shared fetch identity")
+		}
 	}
 }
 

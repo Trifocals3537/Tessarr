@@ -13,6 +13,33 @@ import (
 	"github.com/Trifocals3537/tessarr/internal/nntp"
 )
 
+func TestArticleFailureObservationClaimIsPerFetch(t *testing.T) {
+	cause := &nntp.Error{Type: nntp.ErrorTypeArticleNotFound, Code: 430}
+	first := &articleFailureObservation{cause: cause}
+	second := &articleFailureObservation{cause: cause}
+	if !ClaimArticleFailureObservation(first) || !ClaimArticleFailureObservation(second) ||
+		ClaimArticleFailureObservation(&SegmentReadFailure{Offset: 16, cause: first}) {
+		t.Fatal("claim must distinguish actual fetches and recognize delayed wrappers")
+	}
+	shared := &articleFailureObservation{cause: cause}
+	claims := make(chan bool, 16)
+	for range cap(claims) {
+		go func() { claims <- ClaimArticleFailureObservation(shared) }()
+	}
+	var claimed int
+	for range cap(claims) {
+		if <-claims {
+			claimed++
+		}
+	}
+	if claimed != 1 {
+		t.Fatalf("shared fetch was claimed %d times, want one", claimed)
+	}
+	if !ClaimArticleFailureObservation(cause) || !ClaimArticleFailureObservation(cause) {
+		t.Fatal("untagged errors have no shared fetch identity")
+	}
+}
+
 func TestRecoveryProbeRefreshesCiphertextAndIVOnly(t *testing.T) {
 	appConfig.SetConfigPath(t.TempDir())
 	plain := bytes.Repeat([]byte{1, 2, 3, 4}, 16)

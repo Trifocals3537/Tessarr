@@ -3,6 +3,7 @@ package reader
 import (
 	"context"
 	"errors"
+	"sync/atomic"
 )
 
 type recoveryProbeKey struct{}
@@ -32,12 +33,23 @@ func (e *SegmentReadFailure) Unwrap() error { return e.cause }
 
 // A unique observation belongs to one actual failed fetch, not each reader
 // that later encounters the same cached or shared result.
-type articleFailureObservation struct{ cause error }
+type articleFailureObservation struct {
+	cause   error
+	claimed atomic.Bool
+}
 
 func (e *articleFailureObservation) Error() string { return e.cause.Error() }
 func (e *articleFailureObservation) Unwrap() error { return e.cause }
 
-func SameArticleFailureObservation(a, b error) bool {
-	var first, second *articleFailureObservation
-	return errors.As(a, &first) && errors.As(b, &second) && first == second
+// ClaimArticleFailureObservation returns true only for the first report of a
+// shared failed fetch. Keep the claim on the observation itself, so delayed
+// reports remain recognizable after other failures replace the current
+// quarantine without retaining an unbounded history per file. Untagged errors
+// have no shared fetch identity and are treated as separate observations.
+func ClaimArticleFailureObservation(err error) bool {
+	var observation *articleFailureObservation
+	if !errors.As(err, &observation) {
+		return true
+	}
+	return observation.claimed.CompareAndSwap(false, true)
 }

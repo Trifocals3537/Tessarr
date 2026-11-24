@@ -293,10 +293,21 @@ func TestRangeNNTPReaderHelper(t *testing.T) {
 		if state.failures != 2 || !state.retryAfter.Equal(now.Add(5*time.Minute)) {
 			t.Fatal("fresh absence did not advance the recovery backoff")
 		}
+		probeRevision, probeRetry, probeCause := state.revision, state.retryAfter, state.cause
+		now = now.Add(30 * time.Second)
+		_, cachedProbeErr := base.ReadAtContext(ctx, probeByte[:], 16)
+		// Both the old observation and a copy of the new probe failure
+		// are delayed reports, not additional upstream fetches.
+		for _, replay := range []error{cachedErr, cachedProbeErr} {
+			if !u.recordFailedFile(key, 16, replay) || state.revision != probeRevision ||
+				!state.retryAfter.Equal(probeRetry) || state.cause != probeCause || attempts(tailID) != 2 {
+				t.Fatalf("replayed observation replaced the fresh probe failure: %v", replay)
+			}
+		}
 		mu.Lock()
 		bodies[tailID] = tail
 		mu.Unlock()
-		now = now.Add(5 * time.Minute)
+		now = probeRetry
 		if err := u.EnsureStreamReady(ctx, testNZBID, file.Name); err != nil || attempts(tailID) != 3 {
 			t.Fatalf("restored article was not fetched: %v", err)
 		}
@@ -305,6 +316,88 @@ func TestRangeNNTPReaderHelper(t *testing.T) {
 		}
 		if err := u.Stream(ctx, testNZBID, file.Name, 0, 31, &got); err != nil || !bytes.Equal(got.Bytes(), append(head, tail...)) || attempts(headID) != 1 || attempts(tailID) != 3 {
 			t.Fatalf("restored complete stream did not reuse valid cache: %v", err)
+		}
+	})
+	t.Run("out-of-order failure observations", func(t *testing.T) {
+		now := time.Unix(1700000000, 0)
+		u.failureNow = func() time.Time { return now }
+		u.failedFiles = xsync.NewMap[string, *failedFileState]()
+		u.maxConnections = 1
+		const firstID = "out-of-order-first@fixture"
+		const secondID = "out-of-order-second@fixture"
+		first := bytes.Repeat([]byte{0x51}, 16)
+		second := bytes.Repeat([]byte{0x52}, 16)
+		attempts := func(id string) int {
+			mu.Lock()
+			defer mu.Unlock()
+			return bodyAttempts[id]
+		}
+		file := storage.NZBFile{NzbID: testNZBID, Name: "out-of-order.bin", Size: 32, Segments: []storage.NZBSegment{
+			{MessageID: firstID, Number: 1, Bytes: 16, EndOffset: 15},
+			{MessageID: secondID, Number: 2, Bytes: 16, StartOffset: 16, EndOffset: 31},
+		}}
+		if err := u.nzbStorage.AddNZB(&storage.NZB{ID: testNZBID, Name: "fixture", Files: []storage.NZBFile{file}}); err != nil {
+			t.Fatal(err)
+		}
+		ctx := t.Context()
+		var deferred *customerror.DeferredArticleFailure
+		firstErr := u.Stream(ctx, testNZBID, file.Name, 0, 0, io.Discard)
+		if nntp.ArticleUnavailableReasonOf(firstErr) != nntp.ArticleAbsent || errors.As(firstErr, &deferred) || attempts(firstID) != 1 {
+			t.Fatalf("first failed fetch: %v", firstErr)
+		}
+		key := fsKey(testNZBID, file.Name)
+		entry, ok := u.fs.Load(key)
+		if !ok {
+			t.Fatal("shared reader was not retained")
+		}
+		base, _, err := entry.getOrCreateReader()
+		if err != nil {
+			t.Fatal(err)
+		}
+		// Model another caller admitted before the first failure was fenced.
+		now = now.Add(30 * time.Second)
+		var probeByte [1]byte
+		_, secondErr := base.ReadAtContext(ctx, probeByte[:], 16)
+		if nntp.ArticleUnavailableReasonOf(secondErr) != nntp.ArticleAbsent || u.recordFailedFile(key, 16, secondErr) ||
+			attempts(secondID) != 1 {
+			t.Fatalf("second failed fetch: %v", secondErr)
+		}
+		state, ok := u.failedFiles.Load(key)
+		if !ok || state.failedOffset != 16 {
+			t.Fatal("second failure did not replace the first recovery target")
+		}
+		revision, retryAfter, newerCause := state.revision, state.retryAfter, state.cause
+		now = now.Add(30 * time.Second)
+		if !u.recordFailedFile(key, 0, firstErr) || state.failedOffset != 16 || state.revision != revision ||
+			state.cause != newerCause || !state.retryAfter.Equal(retryAfter) || attempts(firstID) != 1 {
+			t.Fatal("A -> B -> A replay changed the newer failure or created new evidence")
+		}
+		mu.Lock()
+		bodies[secondID] = second
+		mu.Unlock()
+		now = retryAfter
+		if err := u.EnsureStreamReady(ctx, testNZBID, file.Name); err != nil || attempts(secondID) != 2 || attempts(firstID) != 1 {
+			t.Fatalf("newer offset was not recovered independently: %v", err)
+		}
+		// The older segment still has its original failed slot. It must
+		// remain recoverable even though that observation was consumed.
+		if err := u.Stream(ctx, testNZBID, file.Name, 0, 0, io.Discard); !errors.As(err, &deferred) || attempts(firstID) != 1 {
+			t.Fatalf("old cached slot was reported as fresh: %v", err)
+		}
+		state, ok = u.failedFiles.Load(key)
+		if !ok || state.failedOffset != 0 || !state.retryAfter.Equal(now) {
+			t.Fatal("old cached slot was not immediately eligible for a real probe")
+		}
+		mu.Lock()
+		bodies[firstID] = first
+		mu.Unlock()
+		if err := u.EnsureStreamReady(ctx, testNZBID, file.Name); err != nil || attempts(firstID) != 2 {
+			t.Fatalf("older article did not recover: %v", err)
+		}
+		var got bytes.Buffer
+		if err := u.Stream(ctx, testNZBID, file.Name, 0, 31, &got); err != nil || !bytes.Equal(got.Bytes(), append(first, second...)) ||
+			attempts(firstID) != 2 || attempts(secondID) != 2 {
+			t.Fatalf("full stream did not recover through the retained reader: %v", err)
 		}
 	})
 	file := storage.NZBFile{NzbID: testNZBID, Name: "video.mkv", Size: 717500, FileType: storage.NZBFileTypeMedia, Segments: []storage.NZBSegment{{Number: 1, MessageID: "head@fixture", Bytes: 716800, StartOffset: 0, EndOffset: 716799}, {Number: 2, MessageID: "tail@fixture", Bytes: 700, StartOffset: 716800, EndOffset: 717499}}}

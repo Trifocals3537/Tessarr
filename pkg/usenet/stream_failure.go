@@ -51,9 +51,10 @@ func (u *Usenet) failureClock() time.Time {
 	return time.Now()
 }
 
-// recordFailedFile returns true if the current quarantine already represents
-// this exact fetch. Concurrent or cached readers must not renew its cooldown
-// or create another health-evidence observation.
+// recordFailedFile returns true if this exact fetch has already been reported.
+// Concurrent or cached readers must not renew a cooldown or create another
+// health-evidence observation, even after a different failure replaced the
+// current quarantine.
 func (u *Usenet) recordFailedFile(key string, failedOffset int64, cause error) (deferred bool) {
 	if u == nil || u.failedFiles == nil || key == "" || cause == nil {
 		return false
@@ -68,8 +69,8 @@ func (u *Usenet) recordFailedFile(key string, failedOffset int64, cause error) (
 		}
 		state.mu.Lock()
 		defer state.mu.Unlock()
-		if loaded && reader.SameArticleFailureObservation(state.cause, cause) {
-			deferred = true
+		deferred = !reader.ClaimArticleFailureObservation(cause)
+		if loaded && deferred {
 			return state, xsync.CancelOp
 		}
 		if state.failures < 1 {
@@ -78,7 +79,14 @@ func (u *Usenet) recordFailedFile(key string, failedOffset int64, cause error) (
 		state.cause = cause
 		state.failedOffset = failedOffset
 		state.revision++
-		state.retryAfter = now.Add(failedFileBackoff(state.failures))
+		if deferred {
+			// A failed slot can outlive a successful probe of another
+			// segment. Make it eligible for recovery without imposing
+			// another cooldown or treating its cached error as fresh.
+			state.retryAfter = now
+		} else {
+			state.retryAfter = now.Add(failedFileBackoff(state.failures))
+		}
 		// Keep a running probe fenced until it returns. Its result may
 		// not clear or replace this newer failure revision.
 		return state, xsync.UpdateOp
@@ -154,11 +162,12 @@ func (u *Usenet) EnsureStreamReady(ctx context.Context, nzoID, filename string) 
 
 	state.mu.Lock()
 	state.probeInFlight = false
-	repeatedObservation := reader.SameArticleFailureObservation(state.cause, err)
+	articleUnavailable := nntp.IsArticleNotFoundError(err)
+	repeatedObservation := articleUnavailable && !reader.ClaimArticleFailureObservation(err)
 	// A concurrent active read may have recorded a newer failure. Never
 	// overwrite its cause, failed offset, or deadline with the stale verdict.
 	if state.revision == revision {
-		if nntp.IsArticleNotFoundError(err) && !repeatedObservation {
+		if articleUnavailable && !repeatedObservation {
 			state.cause = err
 			state.failures++
 			state.revision++

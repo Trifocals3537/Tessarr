@@ -161,7 +161,7 @@ func (f *remoteFile) readAt(ctx context.Context, p []byte, off int64) (int, erro
 		return 0, io.EOF
 	}
 	if f.unavailable {
-		return 0, &nntp.Error{Type: nntp.ErrorTypeArticleNotFound, Message: "recovery companion is absent on all providers"}
+		return 0, &nntp.Error{Type: nntp.ErrorTypeArticleNotFound, Message: "recovery companion is unavailable on all providers"}
 	}
 	want := min(int64(len(p)), f.size-off)
 	done := int64(0)
@@ -319,7 +319,7 @@ func discoverFile(raw nzbparser.NzbFile, cache *articleCache) (*remoteFile, erro
 		}
 		return f, nil
 	}
-	return nil, &nntp.Error{Type: nntp.ErrorTypeArticleNotFound, Message: "all source articles are absent"}
+	return nil, &nntp.Error{Type: nntp.ErrorTypeArticleNotFound, Message: "all source articles are unavailable"}
 }
 
 type progress func(stage string, readBytes int64) error

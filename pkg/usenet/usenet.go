@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -365,6 +366,9 @@ func (u *Usenet) createEntry(file *storage.NZBFile) (*fsEntry, error) {
 // connection and no prefetch so a 512-byte probe cannot fan out into a full
 // streaming window.
 func (u *Usenet) createEntryWithReadLimits(file *storage.NZBFile, maxConcurrent int, prefetchSize int64) (*fsEntry, error) {
+	if err := validateServingMap(file); err != nil {
+		return nil, err
+	}
 	volumes := GetFileVolumes(file)
 	if len(volumes) == 0 {
 		return nil, fmt.Errorf("no volumes available for file %s", file.Name)
@@ -1012,19 +1016,36 @@ func (u *Usenet) preStreamChecks(file *storage.NZBFile) error {
 }
 
 func (u *Usenet) preStreamChecksInternal(file *storage.NZBFile, allowFailed bool) error {
-	// Check if we have Segments
-	if len(file.Segments) == 0 {
-		return fmt.Errorf("file has no Segments: %s", file.Name)
-	}
-
 	if allowFailed {
 		return nil
 	}
 	return u.CheckStreamReady(file.NzbID, file.Name)
 }
 
+func validateServingMap(file *storage.NZBFile) error {
+	if err := storage.ValidateNZBStreamMap(file, false); err != nil {
+		return customerror.NewError(err, http.StatusUnprocessableEntity, "usenet_invalid_segment_map", false, false).Permanent()
+	}
+	return nil
+}
+
+// PrepareStream checks recovery admission and validates the stored map before
+// a caller commits successful response headers. The cached entry amortizes the
+// map validation over later reads without starting a download.
+func (u *Usenet) PrepareStream(ctx context.Context, nzoID, filename string) error {
+	if err := u.EnsureStreamReady(ctx, nzoID, filename); err != nil {
+		return err
+	}
+	_, key, err := u.getOrCreateEntry(ctx, nzoID, filename)
+	if err != nil {
+		return err
+	}
+	u.releaseFS(key)
+	return nil
+}
+
 // CheckStreamReady returns a permanent error for a file whose serving path has
-// already proven that an article is missing across all configured providers.
+// already proven that an article is unavailable across all configured providers.
 // Callers use this before writing response headers so later WebDAV requests
 // receive a complete HTTP error instead of a successful response with a
 // truncated body that clients may retry indefinitely.
@@ -1097,8 +1118,13 @@ func (u *Usenet) streamInternal(ctx context.Context, nzoID, filename string, sta
 	if u.prefetchSize > 0 && prefetchLen > u.prefetchSize {
 		prefetchLen = u.prefetchSize
 	}
+	if allowFailed {
+		ctx = reader.WithRecoveryProbe(ctx)
+	}
 	section := newContextSectionReader(ctx, readerAt, rangeStart, length)
-	readerAt.Prefetch(section.ctx, rangeStart, prefetchLen)
+	if !allowFailed {
+		readerAt.Prefetch(section.ctx, rangeStart, prefetchLen)
+	}
 	buf := acquireStreamBuffer()
 	defer releaseStreamBuffer(buf)
 
@@ -1113,7 +1139,16 @@ func (u *Usenet) streamInternal(ctx context.Context, nzoID, filename string, sta
 	// Mark file as failed if article not found (permanent error)
 	if err != nil && nntp.IsArticleNotFoundError(err) {
 		if recordFailure {
-			u.recordFailedFile(key, failedReadOffset(rangeStart, rangeEnd, written), err)
+			offset := failedReadOffset(rangeStart, rangeEnd, written)
+			var segmentFailure *reader.SegmentReadFailure
+			if errors.As(err, &segmentFailure) {
+				// A multi-segment read may return zero bytes if a later
+				// segment failed. Probe the actual unavailable article.
+				offset = min(segmentFailure.Offset, ufsEntry.volumes[0].Size-1)
+			}
+			if u.recordFailedFile(key, offset, err) {
+				return customerror.NewDeferredArticleNotFoundError(err)
+			}
 		}
 		// Wrap error to mark as permanent
 		return customerror.NewArticleNotFoundError(err)
@@ -1194,9 +1229,8 @@ func (u *Usenet) Touch(ctx context.Context, nzoID, filename string) error {
 		return err
 	}
 
-	// Check if we have Segments
-	if len(file.Segments) == 0 {
-		return fmt.Errorf("file has no Segments: %s", filename)
+	if err := validateServingMap(file); err != nil {
+		return err
 	}
 
 	// get first segment

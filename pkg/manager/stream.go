@@ -714,11 +714,14 @@ func (m *Manager) streamUsenet(ctx context.Context, entry *storage.Entry, filena
 	if !ok {
 		return retry.Unrecoverable(fmt.Errorf("file not found in entry: %s", filename))
 	}
-	// A previous read may already have proven that an article is permanently
-	// missing across every configured provider. Check before onReady writes a
-	// 200/206 response so WebDAV clients receive a bounded complete error on
-	// subsequent attempts rather than another truncated success response.
-	if err := m.usenet.EnsureStreamReady(ctx, entry.InfoHash, filename); err != nil {
+	// Fence a previously unavailable article and validate the stored segment
+	// map before committing 200/206 headers. DFS reads don't need a separate
+	// map preflight: Stream validates it before constructing its reader.
+	if onReady != nil {
+		if err := m.usenet.PrepareStream(ctx, entry.InfoHash, filename); err != nil {
+			return err
+		}
+	} else if err := m.usenet.EnsureStreamReady(ctx, entry.InfoHash, filename); err != nil {
 		return err
 	}
 

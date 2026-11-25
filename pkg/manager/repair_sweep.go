@@ -19,6 +19,7 @@ import (
 
 	"github.com/Trifocals3537/tessarr/internal/config"
 	"github.com/Trifocals3537/tessarr/internal/customerror"
+	"github.com/Trifocals3537/tessarr/internal/nntp"
 	"github.com/Trifocals3537/tessarr/pkg/arr"
 	debrid "github.com/Trifocals3537/tessarr/pkg/debrid/common"
 	debridTypes "github.com/Trifocals3537/tessarr/pkg/debrid/types"
@@ -450,17 +451,37 @@ func (r *Repair) probeNZBFile(ctx context.Context, entry *storage.Entry, name st
 		res.healthy = true
 		return res
 	}
-	switch {
-	case errors.Is(err, customerror.UsenetSegmentMissingError):
+	if reason := usenetContentFailureReason(err); reason != "" {
 		res.broken = true
-		res.reason = "usenet_segment_missing"
-	case errors.Is(err, customerror.UsenetCorruptContentError):
-		res.broken = true
-		res.reason = "usenet_corrupt_content"
-	default:
+		res.reason = reason
+	} else {
 		res.reason = "usenet_probe_error"
 	}
 	return res
+}
+
+func usenetContentFailureReason(err error) string {
+	var deferred *customerror.DeferredArticleFailure
+	if isDeferredReadFailure(err) || errors.As(err, &deferred) {
+		return ""
+	}
+	switch {
+	case errors.Is(err, storage.ErrInvalidNZBMap):
+		return "usenet_invalid_segment_map"
+	case errors.Is(err, customerror.UsenetSegmentMissingError):
+		return "usenet_segment_missing"
+	case errors.Is(err, customerror.UsenetCorruptContentError):
+		return "usenet_corrupt_content"
+	case nntp.IsArticleNotFoundError(err):
+		switch class := articleReadFailureClass(nntp.ArticleUnavailableReasonOf(err)); class {
+		case "content_missing":
+			return "usenet_segment_missing"
+		default:
+			return "usenet_" + class
+		}
+	default:
+		return ""
+	}
 }
 
 func (r *Repair) probeTorrentFile(ctx context.Context, entry *storage.Entry, file *storage.File, name string, res fileResult, opts RepairRunOptions) fileResult {

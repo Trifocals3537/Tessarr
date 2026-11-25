@@ -6,6 +6,9 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+
+	"github.com/Trifocals3537/tessarr/internal/nntp"
+	"github.com/Trifocals3537/tessarr/pkg/storage"
 )
 
 type streamRequestContextKey struct{}
@@ -90,10 +93,11 @@ func wrapStreamRequestError(id string, err error) error {
 // StreamFailureDiagnostic is safe to put in logs and API diagnostics. It
 // intentionally contains no raw error text, URLs, credentials, or article IDs.
 type StreamFailureDiagnostic struct {
-	RequestID string
-	Class     string
-	Status    int
-	Retryable bool
+	RequestID     string
+	Class         string
+	Status        int
+	Retryable     bool
+	ArticleReason string
 }
 
 // DiagnoseStreamFailure reduces an arbitrary wrapped stream error to stable,
@@ -122,6 +126,9 @@ func DiagnoseStreamFailure(err error) StreamFailureDiagnostic {
 		diagnostic.Class = "canceled"
 	case errors.Is(err, context.DeadlineExceeded):
 		diagnostic.Class = "timeout"
+	case isDeferredReadFailure(err), errors.Is(err, storage.ErrInvalidNZBMap), nntp.IsArticleNotFoundError(err):
+		diagnostic.Class, diagnostic.Retryable = classifyTerminalReadFailure(err)
+		diagnostic.ArticleReason = readArticleFailureReason(err)
 	case errors.Is(err, io.ErrUnexpectedEOF):
 		diagnostic.Class = "unexpected_eof"
 	default:

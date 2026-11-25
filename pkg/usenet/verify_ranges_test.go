@@ -30,6 +30,7 @@ import (
 	"github.com/Trifocals3537/tessarr/internal/logger"
 	"github.com/Trifocals3537/tessarr/internal/nntp"
 	"github.com/Trifocals3537/tessarr/pkg/storage"
+	"github.com/puzpuzpuz/xsync/v4"
 )
 
 type exactRangeReaderFunc func(context.Context, []byte, int64) (int, error)
@@ -47,7 +48,7 @@ func TestExactFailedRangesRejectIncompleteAndCanceledReads(t *testing.T) {
 	}{
 		{"short EOF", 3, io.EOF, io.ErrUnexpectedEOF}, {"short nil", 3, nil, io.ErrUnexpectedEOF},
 		{"full EOF", 4, io.EOF, nil}, {"transport", 4, context.DeadlineExceeded, context.DeadlineExceeded},
-		{"missing", 0, &nntp.Error{Type: nntp.ErrorTypeArticleNotFound}, customerror.UsenetSegmentMissingError},
+		{"missing", 0, &nntp.Error{Type: nntp.ErrorTypeArticleNotFound, Code: 430}, customerror.UsenetSegmentMissingError},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			err := verifyExactRange(context.Background(), exactRangeReaderFunc(func(context.Context, []byte, int64) (int, error) { return tt.n, tt.err }), 100, 96, 4)
@@ -148,6 +149,7 @@ func TestRangeNNTPReaderHelper(t *testing.T) {
 	head := bytes.Repeat([]byte{0xab}, 716800)
 	copy(head, []byte{0x1a, 0x45, 0xdf, 0xa3})
 	bodies := map[string][]byte{"head@fixture": head, "tail@fixture": bytes.Repeat([]byte{0xcd}, 700), "short@fixture": bytes.Repeat([]byte{0xef}, 398336), "garbage@fixture": bytes.Repeat([]byte{0xa0}, 716800)}
+	bodyAttempts := make(map[string]int)
 	var mu sync.Mutex
 	var connections sync.WaitGroup
 	acceptDone := make(chan struct{})
@@ -183,6 +185,7 @@ func TestRangeNNTPReaderHelper(t *testing.T) {
 						_ = p.PrintfLine("223 0 <%s>", id)
 					case "BODY":
 						mu.Lock()
+						bodyAttempts[id]++
 						data := append([]byte(nil), bodies[id]...)
 						mu.Unlock()
 						if data == nil {
@@ -227,6 +230,176 @@ func TestRangeNNTPReaderHelper(t *testing.T) {
 	}
 	u.nntp = client
 	defer func() { _ = u.Close(); _ = listener.Close(); <-acceptDone; connections.Wait() }()
+	t.Run("retained reader recovery", func(t *testing.T) {
+		now := time.Unix(1700000000, 0)
+		u.failureNow = func() time.Time { return now }
+		u.failedFiles = xsync.NewMap[string, *failedFileState]()
+		// One foreground connection means no unrelated read-ahead requests.
+		u.maxConnections = 1
+		const headID = "cooldown-head@fixture"
+		const tailID = "cooldown-tail@fixture"
+		head := bytes.Repeat([]byte{0x12}, 16)
+		tail := bytes.Repeat([]byte{0x34}, 16)
+		mu.Lock()
+		bodies[headID] = head
+		mu.Unlock()
+		attempts := func(id string) int {
+			mu.Lock()
+			defer mu.Unlock()
+			return bodyAttempts[id]
+		}
+		file := storage.NZBFile{NzbID: testNZBID, Name: "cooldown.bin", Size: 32, Segments: []storage.NZBSegment{
+			{MessageID: headID, Number: 1, Bytes: 16, EndOffset: 15},
+			{MessageID: tailID, Number: 2, Bytes: 16, StartOffset: 16, EndOffset: 31},
+		}}
+		if err := u.nzbStorage.AddNZB(&storage.NZB{ID: testNZBID, Name: "fixture", Files: []storage.NZBFile{file}}); err != nil {
+			t.Fatal(err)
+		}
+		ctx := t.Context()
+		var got bytes.Buffer
+		if err := u.Stream(ctx, testNZBID, file.Name, 0, 31, &got); nntp.ArticleUnavailableReasonOf(err) != nntp.ArticleAbsent || got.Len() != 0 {
+			t.Fatalf("initial multi-segment failure = %v, wrote %d", err, got.Len())
+		}
+		key := fsKey(testNZBID, file.Name)
+		state, ok := u.failedFiles.Load(key)
+		if !ok || state.failedOffset != 16 || attempts(headID) != 1 || attempts(tailID) != 1 {
+			t.Fatalf("initial failure did not identify the actual failed article")
+		}
+		entry, ok := u.fs.Load(key)
+		if !ok {
+			t.Fatal("reader was not retained")
+		}
+		base, _, err := entry.getOrCreateReader()
+		if err != nil {
+			t.Fatal(err)
+		}
+		// A read already admitted before quarantine may see the same shared
+		// failed slot. It must not turn that cached fetch into new evidence.
+		initialRevision, initialRetry := state.revision, state.retryAfter
+		now = now.Add(30 * time.Second)
+		var probeByte [1]byte
+		_, cachedErr := base.ReadAtContext(ctx, probeByte[:], 16)
+		if !u.recordFailedFile(key, 16, cachedErr) || state.revision != initialRevision || !state.retryAfter.Equal(initialRetry) || attempts(tailID) != 1 {
+			t.Fatalf("cached segment observation extended quarantine: %v", cachedErr)
+		}
+		var deferred *customerror.DeferredArticleFailure
+		if err := u.EnsureStreamReady(ctx, testNZBID, file.Name); !errors.As(err, &deferred) || attempts(tailID) != 1 {
+			t.Fatalf("cooldown was not a deferred result: %v", err)
+		}
+		now = initialRetry
+		if err := u.EnsureStreamReady(ctx, testNZBID, file.Name); errors.As(err, &deferred) || nntp.ArticleUnavailableReasonOf(err) != nntp.ArticleAbsent || attempts(tailID) != 2 {
+			t.Fatalf("first allowed probe did not fetch failed article again: %v", err)
+		}
+		if state.failures != 2 || !state.retryAfter.Equal(now.Add(5*time.Minute)) {
+			t.Fatal("fresh absence did not advance the recovery backoff")
+		}
+		probeRevision, probeRetry, probeCause := state.revision, state.retryAfter, state.cause
+		now = now.Add(30 * time.Second)
+		_, cachedProbeErr := base.ReadAtContext(ctx, probeByte[:], 16)
+		// Both the old observation and a copy of the new probe failure
+		// are delayed reports, not additional upstream fetches.
+		for _, replay := range []error{cachedErr, cachedProbeErr} {
+			if !u.recordFailedFile(key, 16, replay) || state.revision != probeRevision ||
+				!state.retryAfter.Equal(probeRetry) || state.cause != probeCause || attempts(tailID) != 2 {
+				t.Fatalf("replayed observation replaced the fresh probe failure: %v", replay)
+			}
+		}
+		mu.Lock()
+		bodies[tailID] = tail
+		mu.Unlock()
+		now = probeRetry
+		if err := u.EnsureStreamReady(ctx, testNZBID, file.Name); err != nil || attempts(tailID) != 3 {
+			t.Fatalf("restored article was not fetched: %v", err)
+		}
+		if current, _ := u.fs.Load(key); current != entry {
+			t.Fatal("recovery discarded the shared reader")
+		}
+		if err := u.Stream(ctx, testNZBID, file.Name, 0, 31, &got); err != nil || !bytes.Equal(got.Bytes(), append(head, tail...)) || attempts(headID) != 1 || attempts(tailID) != 3 {
+			t.Fatalf("restored complete stream did not reuse valid cache: %v", err)
+		}
+	})
+	t.Run("out-of-order failure observations", func(t *testing.T) {
+		now := time.Unix(1700000000, 0)
+		u.failureNow = func() time.Time { return now }
+		u.failedFiles = xsync.NewMap[string, *failedFileState]()
+		u.maxConnections = 1
+		const firstID = "out-of-order-first@fixture"
+		const secondID = "out-of-order-second@fixture"
+		first := bytes.Repeat([]byte{0x51}, 16)
+		second := bytes.Repeat([]byte{0x52}, 16)
+		attempts := func(id string) int {
+			mu.Lock()
+			defer mu.Unlock()
+			return bodyAttempts[id]
+		}
+		file := storage.NZBFile{NzbID: testNZBID, Name: "out-of-order.bin", Size: 32, Segments: []storage.NZBSegment{
+			{MessageID: firstID, Number: 1, Bytes: 16, EndOffset: 15},
+			{MessageID: secondID, Number: 2, Bytes: 16, StartOffset: 16, EndOffset: 31},
+		}}
+		if err := u.nzbStorage.AddNZB(&storage.NZB{ID: testNZBID, Name: "fixture", Files: []storage.NZBFile{file}}); err != nil {
+			t.Fatal(err)
+		}
+		ctx := t.Context()
+		var deferred *customerror.DeferredArticleFailure
+		firstErr := u.Stream(ctx, testNZBID, file.Name, 0, 0, io.Discard)
+		if nntp.ArticleUnavailableReasonOf(firstErr) != nntp.ArticleAbsent || errors.As(firstErr, &deferred) || attempts(firstID) != 1 {
+			t.Fatalf("first failed fetch: %v", firstErr)
+		}
+		key := fsKey(testNZBID, file.Name)
+		entry, ok := u.fs.Load(key)
+		if !ok {
+			t.Fatal("shared reader was not retained")
+		}
+		base, _, err := entry.getOrCreateReader()
+		if err != nil {
+			t.Fatal(err)
+		}
+		// Model another caller admitted before the first failure was fenced.
+		now = now.Add(30 * time.Second)
+		var probeByte [1]byte
+		_, secondErr := base.ReadAtContext(ctx, probeByte[:], 16)
+		if nntp.ArticleUnavailableReasonOf(secondErr) != nntp.ArticleAbsent || u.recordFailedFile(key, 16, secondErr) ||
+			attempts(secondID) != 1 {
+			t.Fatalf("second failed fetch: %v", secondErr)
+		}
+		state, ok := u.failedFiles.Load(key)
+		if !ok || state.failedOffset != 16 {
+			t.Fatal("second failure did not replace the first recovery target")
+		}
+		revision, retryAfter, newerCause := state.revision, state.retryAfter, state.cause
+		now = now.Add(30 * time.Second)
+		if !u.recordFailedFile(key, 0, firstErr) || state.failedOffset != 16 || state.revision != revision ||
+			state.cause != newerCause || !state.retryAfter.Equal(retryAfter) || attempts(firstID) != 1 {
+			t.Fatal("A -> B -> A replay changed the newer failure or created new evidence")
+		}
+		mu.Lock()
+		bodies[secondID] = second
+		mu.Unlock()
+		now = retryAfter
+		if err := u.EnsureStreamReady(ctx, testNZBID, file.Name); err != nil || attempts(secondID) != 2 || attempts(firstID) != 1 {
+			t.Fatalf("newer offset was not recovered independently: %v", err)
+		}
+		// The older segment still has its original failed slot. It must
+		// remain recoverable even though that observation was consumed.
+		if err := u.Stream(ctx, testNZBID, file.Name, 0, 0, io.Discard); !errors.As(err, &deferred) || attempts(firstID) != 1 {
+			t.Fatalf("old cached slot was reported as fresh: %v", err)
+		}
+		state, ok = u.failedFiles.Load(key)
+		if !ok || state.failedOffset != 0 || !state.retryAfter.Equal(now) {
+			t.Fatal("old cached slot was not immediately eligible for a real probe")
+		}
+		mu.Lock()
+		bodies[firstID] = first
+		mu.Unlock()
+		if err := u.EnsureStreamReady(ctx, testNZBID, file.Name); err != nil || attempts(firstID) != 2 {
+			t.Fatalf("older article did not recover: %v", err)
+		}
+		var got bytes.Buffer
+		if err := u.Stream(ctx, testNZBID, file.Name, 0, 31, &got); err != nil || !bytes.Equal(got.Bytes(), append(first, second...)) ||
+			attempts(firstID) != 2 || attempts(secondID) != 2 {
+			t.Fatalf("full stream did not recover through the retained reader: %v", err)
+		}
+	})
 	file := storage.NZBFile{NzbID: testNZBID, Name: "video.mkv", Size: 717500, FileType: storage.NZBFileTypeMedia, Segments: []storage.NZBSegment{{Number: 1, MessageID: "head@fixture", Bytes: 716800, StartOffset: 0, EndOffset: 716799}, {Number: 2, MessageID: "tail@fixture", Bytes: 700, StartOffset: 716800, EndOffset: 717499}}}
 	save := func() {
 		t.Helper()
@@ -266,8 +439,8 @@ func TestRangeNNTPReaderHelper(t *testing.T) {
 	if err := u.CheckFile(ctx, testNZBID, file.Name); err != nil {
 		t.Fatalf("short article STAT should succeed: %v", err)
 	}
-	if err := u.VerifyFileRanges(ctx, testNZBID, file.Name, rangeToCheck); err == nil {
-		t.Fatal("CRC-valid short mapped segment accepted")
+	if err := u.VerifyFileRanges(ctx, testNZBID, file.Name, rangeToCheck); nntp.ArticleUnavailableReasonOf(err) != nntp.ArticleIncompleteBody {
+		t.Fatalf("CRC-valid short mapped segment did not retain invalid-data reason: %v", err)
 	}
 	file.Segments[0].MessageID = "garbage@fixture"
 	save()

@@ -218,6 +218,41 @@ func TestEnsureStreamReadyDoesNotClearConcurrentFailure(t *testing.T) {
 	}
 }
 
+func TestFailedRecoveryCannotOverwriteNewerQuarantine(t *testing.T) {
+	now := time.Unix(1700000000, 0)
+	u := &Usenet{failedFiles: xsync.NewMap[string, *failedFileState](), failureNow: func() time.Time { return now }}
+	first := &nntp.Error{Type: nntp.ErrorTypeArticleNotFound, Code: 430}
+	newer := &nntp.Error{Type: nntp.ErrorTypeArticleNotFound, ArticleReason: nntp.ArticleInvalidGeometry}
+	key := fsKey("fixture", "video.mkv")
+	u.recordFailedFile(key, 4, first)
+	now = now.Add(failedFileInitialBackoff)
+	started, release := make(chan struct{}), make(chan struct{})
+	u.failureProbe = func(context.Context, string, string, int64) error {
+		close(started)
+		<-release
+		return first
+	}
+	done := make(chan error, 1)
+	go func() { done <- u.EnsureStreamReady(t.Context(), "fixture", "video.mkv") }()
+	<-started
+	u.recordFailedFile(key, 32, newer)
+	state, _ := u.failedFiles.Load(key)
+	state.mu.Lock()
+	inFlight, revision, retryAfter := state.probeInFlight, state.revision, state.retryAfter
+	state.mu.Unlock()
+	if !inFlight {
+		t.Error("a concurrent failure prematurely reopened probe admission")
+	}
+	close(release)
+	<-done
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if state.cause != newer || state.failedOffset != 32 || state.revision != revision ||
+		!state.retryAfter.Equal(retryAfter) || state.probeInFlight {
+		t.Fatal("stale probe overwrote newer quarantine state")
+	}
+}
+
 func TestCheckStreamReadyToleratesUninitializedFailureCache(t *testing.T) {
 	if err := (*Usenet)(nil).CheckStreamReady("nzb-id", "Movie.mkv"); err != nil {
 		t.Fatalf("nil usenet returned error: %v", err)

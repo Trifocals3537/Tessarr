@@ -178,3 +178,15 @@ func NewArticleNotFoundError(err error) *Error {
 		Code:       "usenet_article_not_found",
 	}).Permanent()
 }
+
+// DeferredArticleFailure indicates a previously observed article failure
+// whose recovery cooldown or in-flight probe prevented a new upstream read.
+// Preserve the underlying error and the existing HTTP 410 response contract.
+type DeferredArticleFailure struct{ cause error }
+
+func (e *DeferredArticleFailure) Error() string { return "usenet article recovery is deferred" }
+func (e *DeferredArticleFailure) Unwrap() error { return e.cause }
+
+func NewDeferredArticleNotFoundError(cause error) *Error {
+	return NewArticleNotFoundError(&DeferredArticleFailure{cause: cause})
+}

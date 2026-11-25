@@ -205,18 +205,20 @@ func (sr *StreamingReader) readAtPlain(ctx context.Context, p []byte, off int64)
 	// this session's stale queued hints, but it must never discard read-ahead
 	// requested by another viewer sharing the same StreamingReader.
 	session := prefetchSessionFromContext(ctx)
-	if session != nil && session.observeRead(startSeg, endSeg, sr.config.PrefetchAhead) {
-		sr.fetcher.CancelPendingPrefetch(session)
-	}
+	if !isRecoveryProbe(ctx) {
+		if session != nil && session.observeRead(startSeg, endSeg, sr.config.PrefetchAhead) {
+			sr.fetcher.CancelPendingPrefetch(session)
+		}
 
-	// Queue prefetch for read-ahead (non-blocking)
-	prefetchEnd := min(endSeg+sr.config.PrefetchAhead, sr.segCount-1)
-	if prefetchEnd > endSeg {
-		sr.fetcher.QueuePrefetchRange(ctx, endSeg+1, prefetchEnd)
+		// Queue prefetch for read-ahead (non-blocking)
+		prefetchEnd := min(endSeg+sr.config.PrefetchAhead, sr.segCount-1)
+		if prefetchEnd > endSeg {
+			sr.fetcher.QueuePrefetchRange(ctx, endSeg+1, prefetchEnd)
+		}
 	}
 
 	// Ensure all required segments are available (may block for downloads)
-	if err := sr.fetcher.EnsureSegments(ctx, startSeg, endSeg); err != nil {
+	if err := sr.fetcher.EnsureSegments(ctx, startSeg, endSeg, off); err != nil {
 		sr.stats.ReadErrors.Add(1)
 		return 0, err
 	}
@@ -257,7 +259,7 @@ func (sr *StreamingReader) readFromCache(ctx context.Context, p []byte, off int6
 	for segIdx := startSeg; segIdx <= endSeg; segIdx++ {
 		// Wait for segment to be ready
 		if err := sr.cache.WaitForSegment(ctx, segIdx); err != nil {
-			return totalRead, err
+			return totalRead, sr.fetcher.segmentReadFailure(segIdx, off, err)
 		}
 
 		// Calculate the intersection of the caller's range with this segment.
@@ -299,7 +301,7 @@ func (sr *StreamingReader) readFromCache(ctx context.Context, p []byte, off int6
 			sr.logger.Warn().Int("segment", segIdx).Msg("segment data missing after wait, re-fetching")
 			sr.cache.invalidateForRefetch(segIdx)
 			if err := sr.fetcher.Fetch(ctx, segIdx); err != nil {
-				return totalRead, fmt.Errorf("re-fetch segment %d: %w", segIdx, err)
+				return totalRead, sr.fetcher.segmentReadFailure(segIdx, off, err)
 			}
 			n, ok = sr.cache.ReadRangeInto(segIdx, segDataOffset, copyLen, p[outOffset:outOffset+copyLen])
 			if !ok {
@@ -353,7 +355,15 @@ func (sr *StreamingReader) readAtEncrypted(ctx context.Context, p []byte, off in
 
 		// Decrypt
 		if decryptErr := sr.decryptInPlace(ctx, buf[:decryptedLen], alignedStart); decryptErr != nil {
-			return 0, fmt.Errorf("decrypt: %w", decryptErr)
+			failure := fmt.Errorf("decrypt: %w", decryptErr)
+			var unavailable *SegmentReadFailure
+			if errors.As(decryptErr, &unavailable) {
+				// The missing article supplies the IV for this logical
+				// read. Probing the IV's own plaintext position would
+				// unnecessarily require the preceding ciphertext block.
+				return 0, &SegmentReadFailure{Offset: off, cause: failure}
+			}
+			return 0, failure
 		}
 	}
 

@@ -170,7 +170,7 @@ func TestVerificationPropagatesCancellationAndMissingArticle(t *testing.T) {
 	if err := verificationError("movie.mkv", nil, context.Canceled); !errors.Is(err, context.Canceled) {
 		t.Fatalf("cancellation error = %v", err)
 	}
-	missing := &nntp.Error{Type: nntp.ErrorTypeArticleNotFound, Message: "gone"}
+	missing := &nntp.Error{Type: nntp.ErrorTypeArticleNotFound, Code: 430, Message: "gone"}
 	err := verificationError("movie.mkv", nil, missing)
 	if !errors.Is(err, customerror.UsenetSegmentMissingError) {
 		t.Fatalf("missing article error = %v, want missing-segment marker", err)

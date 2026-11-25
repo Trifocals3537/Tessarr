@@ -31,10 +31,78 @@ const (
 
 // Error represents an NNTP-specific error
 type Error struct {
-	Type    ErrorType
-	Code    int    // NNTP response code
-	Message string // Error message
-	Err     error  // Underlying error
+	Type          ErrorType
+	Code          int                      // NNTP response code
+	Message       string                   // Error message
+	Err           error                    // Underlying error
+	ArticleReason ArticleUnavailableReason // Safe reason for ErrorTypeArticleNotFound
+}
+
+// ArticleUnavailableReason refines the existing failover category: not all
+// unusable articles are absent. Only these allowlisted values may enter
+// diagnostics; provider messages and article identifiers are not reasons.
+type ArticleUnavailableReason string
+
+const (
+	ArticleAbsent           ArticleUnavailableReason = "provider_absent"
+	ArticleInvalidGeometry  ArticleUnavailableReason = "invalid_yenc_geometry"
+	ArticleEmptyBody        ArticleUnavailableReason = "empty_decoded_body"
+	ArticleIncompleteBody   ArticleUnavailableReason = "incomplete_decoded_body"
+	ArticleInvalidPayload   ArticleUnavailableReason = "invalid_yenc_payload"
+	ArticleInvalidData      ArticleUnavailableReason = "invalid_article_data"
+	ArticleMixedUnavailable ArticleUnavailableReason = "mixed_unavailable"
+	ArticleUnknownReason    ArticleUnavailableReason = "unclassified_unavailable"
+)
+
+func (r ArticleUnavailableReason) InvalidData() bool {
+	switch r {
+	case ArticleInvalidGeometry, ArticleEmptyBody, ArticleIncompleteBody, ArticleInvalidPayload, ArticleInvalidData:
+		return true
+	default:
+		return false
+	}
+}
+
+// articleUnavailableSummary retains the last causal error and the aggregate
+// reason after all providers/backbones have been covered.
+type articleUnavailableSummary struct {
+	reason ArticleUnavailableReason
+	cause  error
+}
+
+func (e *articleUnavailableSummary) Error() string { return e.cause.Error() }
+func (e *articleUnavailableSummary) Unwrap() error { return e.cause }
+
+func ArticleUnavailableReasonOf(err error) ArticleUnavailableReason {
+	if !IsArticleNotFoundError(err) {
+		return ""
+	}
+	var summary *articleUnavailableSummary
+	if errors.As(err, &summary) {
+		return summary.reason
+	}
+	var typed *Error
+	if errors.As(err, &typed) {
+		switch typed.ArticleReason {
+		case ArticleAbsent, ArticleInvalidGeometry, ArticleEmptyBody, ArticleIncompleteBody,
+			ArticleInvalidPayload, ArticleInvalidData, ArticleMixedUnavailable, ArticleUnknownReason:
+			return typed.ArticleReason
+		}
+		if typed.Code == 423 || typed.Code == 430 {
+			return ArticleAbsent
+		}
+	}
+	return ArticleUnknownReason
+}
+
+func mergeArticleUnavailableReasons(previous, current ArticleUnavailableReason) ArticleUnavailableReason {
+	if previous == "" || previous == current {
+		return current
+	}
+	if previous.InvalidData() && current.InvalidData() {
+		return ArticleInvalidData
+	}
+	return ArticleMixedUnavailable
 }
 
 func (e *Error) Error() string {

@@ -13,9 +13,9 @@
   },
   "devDependencies": {
     "@tailwindcss/postcss": "4.3.5",
-    "daisyui": "^5.8.0",
+    "daisyui": "^5.8.1",
     "postcss": "^8.5.25",
     "tailwindcss": "4.3.5",
-    "terser": "^5.51.2"
+    "terser": "^5.51.3"
   }
 }

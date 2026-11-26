@@ -5,17 +5,17 @@ go 1.26.11
 require (
 	github.com/Tensai75/nzbparser v0.1.0
 	github.com/Tensai75/rapidyenc v0.0.1
-	github.com/anacrolix/torrent v1.62.0
+	github.com/anacrolix/torrent v1.63.0
 	github.com/bytedance/sonic v1.15.5
 	github.com/go-chi/chi/v5 v5.5.0
-	github.com/go-co-op/gocron/v2 v2.23.1
+	github.com/go-co-op/gocron/v2 v2.23.2
 	github.com/gofrs/flock v0.13.2
 	github.com/google/uuid v1.6.0
 	github.com/gorilla/sessions v1.4.0
 	github.com/hanwen/go-fuse/v2 v2.12.1
 	github.com/hashicorp/go-retryablehttp v0.7.8
 	github.com/javi11/sevenzip v1.6.2-0.20251026160715-ca961b7f1239
-	github.com/klauspost/compress v1.20.4
+	github.com/klauspost/compress v1.20.5
 	github.com/puzpuzpuz/xsync/v3 v3.5.1
 	github.com/puzpuzpuz/xsync/v4 v4.5.0
 	github.com/robfig/cron/v3 v3.0.1
@@ -26,7 +26,7 @@ require (
 	go.uber.org/ratelimit v0.3.1
 	go4.org v0.0.0-20200411211856-f5505b9728dd
 	golang.org/x/crypto v0.59.0
-	golang.org/x/net v0.62.0
+	golang.org/x/net v0.63.0
 	golang.org/x/sync v0.25.0
 	golang.org/x/sys v0.50.0
 	golang.org/x/term v0.48.0
@@ -38,8 +38,7 @@ require (
 require (
 	github.com/Tensai75/subjectparser v0.1.0 // indirect
 	github.com/anacrolix/generics v0.2.0 // indirect
-	github.com/anacrolix/missinggo v1.3.0 // indirect
-	github.com/anacrolix/missinggo/v2 v2.11.0 // indirect
+	github.com/anacrolix/missinggo/v2 v2.12.0 // indirect
 	github.com/andybalholm/brotli v1.2.7 // indirect
 	github.com/benbjohnson/clock v1.3.0 // indirect
 	github.com/bodgit/plumbing v1.3.0 // indirect
@@ -51,7 +50,6 @@ require (
 	github.com/gorilla/securecookie v1.1.2 // indirect
 	github.com/hashicorp/go-cleanhttp v0.5.2 // indirect
 	github.com/hashicorp/golang-lru/v2 v2.0.7 // indirect
-	github.com/huandu/xstrings v1.3.2 // indirect
 	github.com/jonboulle/clockwork v0.5.0 // indirect
 	github.com/klauspost/cpuid/v2 v2.2.9 // indirect
 	github.com/mattn/go-colorable v0.1.14 // indirect
